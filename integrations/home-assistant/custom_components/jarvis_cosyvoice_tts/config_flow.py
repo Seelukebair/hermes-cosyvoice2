@@ -13,10 +13,12 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
     CONF_BASE_URL,
     CONF_BEARER_TOKEN,
+    CONF_CONTINUOUS_SENTENCE_STREAMING,
     CONF_FALLBACK_ENTITY_ID,
     CONF_REQUEST_TIMEOUT,
     CONF_MULTI_SENTENCE_STREAMING,
     DEFAULT_BASE_URL,
+    DEFAULT_CONTINUOUS_SENTENCE_STREAMING,
     DEFAULT_FALLBACK_ENTITY_ID,
     DEFAULT_REQUEST_TIMEOUT,
     DEFAULT_MULTI_SENTENCE_STREAMING,
@@ -102,6 +104,13 @@ class JarvisCosyVoiceConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT
                     ),
                 ): probatio.All(int, probatio.Range(min=10, max=600)),
+                probatio.Optional(
+                    CONF_CONTINUOUS_SENTENCE_STREAMING,
+                    default=(user_input or {}).get(
+                        CONF_CONTINUOUS_SENTENCE_STREAMING,
+                        DEFAULT_CONTINUOUS_SENTENCE_STREAMING,
+                    ),
+                ): bool,
                 probatio.Optional(
                     CONF_MULTI_SENTENCE_STREAMING,
                     default=(user_input or {}).get(

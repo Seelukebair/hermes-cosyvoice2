@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.12.1
+
+- Add continuous sentence streaming for Home Assistant: completed answer
+  sentences enter one bounded backend session and one uninterrupted WAV response.
+- Enable the single-response mode by default while keeping the
+  mobile-incompatible legacy multi-feed mode separate and disabled.
+- Bound session count, queued sentences, retained text, idle time, and total time;
+  promptly cancel disconnected streams and preserve fallback until real audio exists.
+
 ## 1.12.0
 
 - Warm saved voice conditioning after profile switches or reference replacement.

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, Callable
 
 from aiohttp import ClientError, ClientTimeout
 
@@ -29,10 +30,12 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .const import (
     CONF_BASE_URL,
     CONF_BEARER_TOKEN,
+    CONF_CONTINUOUS_SENTENCE_STREAMING,
     CONF_FALLBACK_ENTITY_ID,
     CONF_REQUEST_TIMEOUT,
     CONF_MULTI_SENTENCE_STREAMING,
     DEFAULT_LANGUAGE,
+    DEFAULT_CONTINUOUS_SENTENCE_STREAMING,
     DEFAULT_SPEED,
     DEFAULT_VOICE,
     DEFAULT_MULTI_SENTENCE_STREAMING,
@@ -42,12 +45,14 @@ from .const import (
     MAX_STREAM_MESSAGE_BYTES,
     MAX_STREAM_REQUEST_BYTES,
     STREAM_ENDPOINT,
+    SYNTHESIS_SESSIONS_ENDPOINT,
     STREAM_READ_SIZE,
 )
 
 _LOGGER = logging.getLogger(__name__)
 _SUPPORTED_LANGUAGES = ["en-US", "en-GB", "en"]
 _SENTENCE_END = re.compile(r"(?<=[.!?])(?:[\"')\]]+)?\s+")
+_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 async def async_setup_entry(
@@ -86,6 +91,12 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
                 CONF_MULTI_SENTENCE_STREAMING, DEFAULT_MULTI_SENTENCE_STREAMING
             )
         )
+        self._continuous_sentence_streaming = bool(
+            entry.data.get(
+                CONF_CONTINUOUS_SENTENCE_STREAMING,
+                DEFAULT_CONTINUOUS_SENTENCE_STREAMING,
+            )
+        )
 
     @callback
     def async_get_supported_voices(self, language: str) -> list[Voice]:
@@ -115,16 +126,19 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
         item. Collecting that one item here still lets the client play while
         CosyVoice generates, and avoids synthesizing arbitrary LLM token pieces.
         """
+        if getattr(
+            self,
+            "_continuous_sentence_streaming",
+            DEFAULT_CONTINUOUS_SENTENCE_STREAMING,
+        ):
+            return await self._async_stream_continuous_sentences(request)
+
         if not getattr(
             self, "_multi_sentence_streaming", DEFAULT_MULTI_SENTENCE_STREAMING
         ):
             message = await self._async_collect_stream_message(request.message_gen)
             payload = self._payload(message, request.options)
-            if (
-                len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-                > MAX_STREAM_REQUEST_BYTES
-            ):
-                raise HomeAssistantError("TTS stream request exceeds the bridge limit")
+            self._assert_stream_request_bound(payload)
             try:
                 return await self._async_open_cosyvoice_stream(payload)
             except (ClientError, TimeoutError, HomeAssistantError, ValueError) as err:
@@ -146,11 +160,7 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
         except StopAsyncIteration as err:
             raise HomeAssistantError("TTS stream input is empty") from err
         payload = self._payload(first_sentence, request.options)
-        if (
-            len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-            > MAX_STREAM_REQUEST_BYTES
-        ):
-            raise HomeAssistantError("TTS stream request exceeds the bridge limit")
+        self._assert_stream_request_bound(payload)
         try:
             first = await self._async_open_cosyvoice_stream(payload)
 
@@ -185,6 +195,78 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
 
             return TTSAudioResponse(extension, fallback_data_gen())
 
+    async def _async_stream_continuous_sentences(
+        self, request: TTSAudioRequest
+    ) -> TTSAudioResponse:
+        """Feed completed sentences into one backend-owned WAV session."""
+        sentences = self._async_sentence_messages(request.message_gen)
+        try:
+            first_sentence = await anext(sentences)
+        except StopAsyncIteration as err:
+            raise HomeAssistantError("TTS stream input is empty") from err
+
+        received_sentences = [first_sentence]
+        payload = self._payload(first_sentence, request.options)
+        self._assert_stream_request_bound(payload)
+        session_id: str | None = None
+        producer: asyncio.Task[None] | None = None
+        audio_interrupted = False
+
+        def mark_audio_interrupted() -> None:
+            nonlocal audio_interrupted
+            audio_interrupted = True
+
+        try:
+            session_id = await self._async_create_synthesis_session(payload)
+            producer = asyncio.create_task(
+                self._async_produce_session_text(
+                    session_id, sentences, received_sentences
+                ),
+                name=f"jarvis-cosyvoice-session-{session_id}",
+            )
+            stream = await self._async_open_session_audio(
+                session_id, mark_audio_interrupted
+            )
+        except (ClientError, TimeoutError, HomeAssistantError, ValueError) as err:
+            if producer is not None:
+                await self._async_wait_for_producer(producer)
+            else:
+                received_sentences.extend(
+                    [sentence async for sentence in sentences]
+                )
+            if session_id is not None:
+                await self._async_delete_synthesis_session(session_id, quiet=True)
+            _LOGGER.warning(
+                "Jarvis CosyVoice continuous stream unavailable before audio; trying fallback entity %s: %s",
+                self._fallback_entity_id,
+                err,
+            )
+            extension, audio = await self._async_get_fallback_audio(
+                " ".join(received_sentences)
+            )
+
+            async def fallback_data_gen() -> AsyncGenerator[bytes]:
+                yield audio
+
+            return TTSAudioResponse(extension, fallback_data_gen())
+
+        async def session_audio() -> AsyncGenerator[bytes]:
+            completed = False
+            try:
+                async for chunk in stream.data_gen:
+                    yield chunk
+                completed = True
+            finally:
+                if completed and not audio_interrupted:
+                    # The producer sends finish even when source parsing or a
+                    # later control call fails. Audio has already started, so a
+                    # producer failure is logged rather than changing voices.
+                    await self._async_wait_for_producer(producer)
+                else:
+                    await self._async_cancel_session(session_id, producer)
+
+        return TTSAudioResponse("wav", session_audio())
+
     async def _async_get_cosyvoice_audio(
         self, message: str, options: dict[str, Any]
     ) -> TtsAudioType:
@@ -217,6 +299,15 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
             "speed": float(options.get(OPTION_SPEED, DEFAULT_SPEED)),
             "instruct": str(options.get(OPTION_INSTRUCT, "")),
         }
+
+    @staticmethod
+    def _assert_stream_request_bound(payload: dict[str, Any]) -> None:
+        """Keep every bridge POST within the shared bounded request contract."""
+        if (
+            len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+            > MAX_STREAM_REQUEST_BYTES
+        ):
+            raise HomeAssistantError("TTS stream request exceeds the bridge limit")
 
     async def _async_collect_stream_message(
         self, message_gen: AsyncGenerator[str]
@@ -265,12 +356,35 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
     ) -> TTSAudioResponse:
         """Open and validate the first WAV bytes before exposing audio to HA."""
         session = async_get_clientsession(self.hass)
-        request_context = session.post(
-            self._base_url + STREAM_ENDPOINT,
-            json=payload,
-            headers={"Authorization": f"Bearer {self._token}"},
-            timeout=ClientTimeout(total=self._request_timeout),
+        return await self._async_open_audio_stream(
+            session.post(
+                self._base_url + STREAM_ENDPOINT,
+                json=payload,
+                headers={"Authorization": f"Bearer {self._token}"},
+                timeout=ClientTimeout(total=self._request_timeout),
+            )
         )
+
+    async def _async_open_session_audio(
+        self, session_id: str, on_interrupted: Callable[[], None]
+    ) -> TTSAudioResponse:
+        """Open the one WAV stream associated with a synthesis session."""
+        session = async_get_clientsession(self.hass)
+        return await self._async_open_audio_stream(
+            session.get(
+                self._session_url(session_id) + "/audio",
+                headers={"Authorization": f"Bearer {self._token}"},
+                timeout=ClientTimeout(total=self._request_timeout),
+            ),
+            on_interrupted=on_interrupted,
+        )
+
+    async def _async_open_audio_stream(
+        self,
+        request_context: Any,
+        on_interrupted: Callable[[], None] | None = None,
+    ) -> TTSAudioResponse:
+        """Validate a WAV response before returning a generator to HA."""
         response = await request_context.__aenter__()
         try:
             if response.status != 200:
@@ -307,12 +421,150 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
                 # Audio already reached HA. A fallback would switch voices partway
                 # through an utterance, so close this stream and report the fault.
                 _LOGGER.warning("Jarvis CosyVoice stream ended after audio: %s", err)
+                if on_interrupted is not None:
+                    on_interrupted()
                 return
             finally:
                 response.close()
                 await request_context.__aexit__(None, None, None)
 
         return TTSAudioResponse("wav", data_gen())
+
+    def _session_url(self, session_id: str) -> str:
+        """Build a bridge session URL only from an opaque server-issued id."""
+        if not _SESSION_ID.fullmatch(session_id):
+            raise HomeAssistantError("CosyVoice bridge returned an invalid session id")
+        return self._base_url + SYNTHESIS_SESSIONS_ENDPOINT + "/" + session_id
+
+    async def _async_create_synthesis_session(self, payload: dict[str, Any]) -> str:
+        """Create a backend session and validate its opaque response id."""
+        session = async_get_clientsession(self.hass)
+        async with session.post(
+            self._base_url + SYNTHESIS_SESSIONS_ENDPOINT,
+            json=payload,
+            headers={"Authorization": f"Bearer {self._token}"},
+            timeout=ClientTimeout(total=self._request_timeout),
+        ) as response:
+            if response.status not in (200, 201):
+                detail = (await response.text())[:240]
+                raise HomeAssistantError(
+                    f"CosyVoice bridge returned HTTP {response.status}: {detail}"
+                )
+            try:
+                result = json.loads(await response.text())
+            except (UnicodeDecodeError, json.JSONDecodeError) as err:
+                raise HomeAssistantError(
+                    "CosyVoice bridge returned an invalid synthesis session"
+                ) from err
+        session_id = result.get("session_id") if isinstance(result, dict) else None
+        if not isinstance(session_id, str) or not _SESSION_ID.fullmatch(session_id):
+            raise HomeAssistantError("CosyVoice bridge returned an invalid session id")
+        return session_id
+
+    async def _async_produce_session_text(
+        self,
+        session_id: str,
+        sentences: AsyncGenerator[str],
+        received_sentences: list[str],
+    ) -> None:
+        """Serially upload later sentences and always signal end of input."""
+        failure: BaseException | None = None
+        try:
+            async for sentence in sentences:
+                received_sentences.append(sentence)
+                if failure is not None:
+                    continue
+                try:
+                    payload = {"text": sentence}
+                    self._assert_stream_request_bound(payload)
+                    await self._async_post_session_text(session_id, payload)
+                except (ClientError, TimeoutError, HomeAssistantError, ValueError) as err:
+                    # Continue draining the HA generator so pre-audio fallback
+                    # still has the complete answer and input stays bounded.
+                    failure = err
+        except BaseException as err:
+            failure = err
+        finally:
+            try:
+                await self._async_finish_synthesis_session(session_id)
+            except (ClientError, TimeoutError, HomeAssistantError, ValueError) as err:
+                if failure is None:
+                    failure = err
+        if failure is not None:
+            raise failure
+
+    async def _async_post_session_text(
+        self, session_id: str, payload: dict[str, str]
+    ) -> None:
+        """Forward one bounded completed sentence with natural backpressure."""
+        await self._async_session_control_request("post", session_id, "text", payload)
+
+    async def _async_finish_synthesis_session(self, session_id: str) -> None:
+        """Tell the backend no additional session text will be supplied."""
+        await self._async_session_control_request("post", session_id, "finish")
+
+    async def _async_delete_synthesis_session(
+        self, session_id: str, *, quiet: bool = False
+    ) -> None:
+        """Cancel backend work after a disconnect or failed stream setup."""
+        try:
+            await self._async_session_control_request("delete", session_id)
+        except (ClientError, TimeoutError, HomeAssistantError, ValueError):
+            if not quiet:
+                _LOGGER.warning("Unable to cancel CosyVoice synthesis session %s", session_id)
+
+    async def _async_session_control_request(
+        self,
+        method: str,
+        session_id: str,
+        suffix: str = "",
+        payload: dict[str, str] | None = None,
+    ) -> None:
+        """Perform a short session control request without holding audio state."""
+        session = async_get_clientsession(self.hass)
+        request = getattr(session, method)
+        kwargs: dict[str, Any] = {
+            "headers": {"Authorization": f"Bearer {self._token}"},
+            "timeout": ClientTimeout(total=self._request_timeout),
+        }
+        if payload is not None:
+            kwargs["json"] = payload
+        url = self._session_url(session_id)
+        if suffix:
+            url += "/" + suffix
+        async with request(url, **kwargs) as response:
+            if response.status not in (200, 202, 204):
+                detail = (await response.text())[:240]
+                raise HomeAssistantError(
+                    f"CosyVoice bridge returned HTTP {response.status}: {detail}"
+                )
+
+    async def _async_wait_for_producer(self, producer: asyncio.Task[None]) -> None:
+        """Observe producer failure without ever changing a started voice."""
+        try:
+            await producer
+        except asyncio.CancelledError:
+            raise
+        except (ClientError, TimeoutError, HomeAssistantError, ValueError) as err:
+            _LOGGER.warning("Jarvis CosyVoice sentence producer ended: %s", err)
+
+    async def _async_cancel_session(
+        self, session_id: str, producer: asyncio.Task[None]
+    ) -> None:
+        """Cancel source production before cancelling the backend session."""
+        if not producer.done():
+            producer.cancel()
+        try:
+            await producer
+        except (
+            asyncio.CancelledError,
+            ClientError,
+            TimeoutError,
+            HomeAssistantError,
+            ValueError,
+        ):
+            pass
+        await self._async_delete_synthesis_session(session_id, quiet=True)
 
     async def _async_get_fallback_audio(self, message: str) -> TtsAudioType:
         """Call the existing Home Assistant TTS entity without media playback."""

@@ -177,6 +177,8 @@ The optional package under [`integrations/home-assistant`](integrations/home-ass
 contains a config-entry TTS entity and an authenticated bridge. The bridge reads
 the same accepted session/default selector as Hermes, rejects preview candidates,
 limits concurrent backend work, and can fall back to another HA TTS entity.
+Its continuous sentence mode synthesizes completed answer sentences into
+one HA-compatible WAV response; the older multi-feed mode remains disabled.
 
 It is deliberately separate from the core plugin because deploying it requires
 Home Assistant-specific configuration, a LAN address allow-list, and a dedicated

@@ -30,6 +30,7 @@ class BackendServer(ThreadingHTTPServer):
         self.active = 0
         self.max_active = 0
         self.payloads: list[dict] = []
+        self.requests: list[tuple[str, str, dict | None]] = []
         self.stream_chunks: list[bytes] = []
         self.first_stream_chunk = threading.Event()
 
@@ -55,6 +56,13 @@ class BackendHandler(BaseHTTPRequestHandler):
                 self.server.fail_next = False
                 self.connection.shutdown(socket.SHUT_RDWR)
                 return
+            if self.path.endswith("/audio"):
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                self._write_stream()
+                return
             if self.server.block_requests:
                 self.server.release.wait(3)
             data = b'{"ready":false}'
@@ -68,9 +76,23 @@ class BackendHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))
-        payload = json.loads(self.rfile.read(length))
+        payload = json.loads(self.rfile.read(length)) if length else None
         with self.server.lock:
-            self.server.payloads.append(payload)
+            self.server.requests.append(("POST", self.path, payload))
+            if payload is not None:
+                self.server.payloads.append(payload)
+        if self.path == "/synthesis-sessions":
+            data = b'{"session_id":"session-one"}'
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path.endswith("/text") or self.path.endswith("/finish"):
+            self.send_response(204)
+            self.end_headers()
+            return
         if self.path == "/synthesize-stream":
             self._enter()
             try:
@@ -78,23 +100,7 @@ class BackendHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "audio/wav")
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
-                for index, chunk in enumerate(self.server.stream_chunks):
-                    try:
-                        self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
-                        self.wfile.write(chunk)
-                        self.wfile.write(b"\r\n")
-                        self.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                        return
-                    if index == 0:
-                        self.server.first_stream_chunk.set()
-                        if self.server.block_stream_after_first:
-                            self.server.release.wait(3)
-                try:
-                    self.wfile.write(b"0\r\n\r\n")
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                    return
+                self._write_stream()
             finally:
                 self._leave()
             return
@@ -104,6 +110,31 @@ class BackendHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        with self.server.lock:
+            self.server.requests.append(("DELETE", self.path, None))
+        self.send_response(204)
+        self.end_headers()
+
+    def _write_stream(self) -> None:
+        for index, chunk in enumerate(self.server.stream_chunks):
+            try:
+                self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
+                self.wfile.write(chunk)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                return
+            if index == 0:
+                self.server.first_stream_chunk.set()
+                if self.server.block_stream_after_first:
+                    self.server.release.wait(3)
+        try:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
 
 
 class ProxyTests(unittest.TestCase):
@@ -195,7 +226,13 @@ class ProxyTests(unittest.TestCase):
             connection.request(method, path, body=encoded, headers=headers)
             response = connection.getresponse()
             data = response.read()
-            return response.status, dict(response.headers), json.loads(data) if data else None
+            headers_out = dict(response.headers)
+            payload = (
+                json.loads(data)
+                if data and headers_out.get("Content-Type") == "application/json"
+                else None
+            )
+            return response.status, headers_out, payload
         finally:
             connection.close()
 
@@ -212,6 +249,18 @@ class ProxyTests(unittest.TestCase):
                 "Authorization": "Bearer test-token",
                 "Content-Type": "application/json",
             },
+        )
+        return connection, connection.getresponse()
+
+    @staticmethod
+    def _session_audio_request(server, session_id: str):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", server.server_port, timeout=4
+        )
+        connection.request(
+            "GET",
+            f"/synthesis-sessions/{session_id}/audio",
+            headers={"Authorization": "Bearer test-token"},
         )
         return connection, connection.getresponse()
 
@@ -383,6 +432,95 @@ class ProxyTests(unittest.TestCase):
                 break
             threading.Event().wait(0.05)
         self.assertEqual(200, status, "stream slot was not released after disconnect")
+
+    def test_session_create_pins_profile_and_routes_controls_without_reselection(self) -> None:
+        backend = self._start_backend()
+        server = self._start_proxy()
+        self._profile("profiles", "saved-one")
+        self._profile("profiles", "saved-two")
+        self._state(session_profile=None, session_candidate=False, default_profile="saved-one")
+
+        status, _, payload = self._request(
+            server, "POST", "/synthesis-sessions", {"text": "First.", "voice": "default"}
+        )
+        self.assertEqual(201, status)
+        self.assertEqual("session-one", payload["session_id"])
+        self._state(session_profile=None, session_candidate=False, default_profile="saved-two")
+        text_status, _, _ = self._request(
+            server, "POST", "/synthesis-sessions/session-one/text", {"text": "Later."}
+        )
+        finish_status, _, _ = self._request(
+            server, "POST", "/synthesis-sessions/session-one/finish"
+        )
+        delete_status, _, _ = self._request(
+            server, "DELETE", "/synthesis-sessions/session-one"
+        )
+
+        self.assertEqual(204, text_status)
+        self.assertEqual(204, finish_status)
+        self.assertEqual(204, delete_status)
+        created = next(request for request in backend.requests if request[1] == "/synthesis-sessions")
+        self.assertEqual("saved-one", created[2]["voice"])
+        text = next(request for request in backend.requests if request[1].endswith("/text"))
+        self.assertEqual({"text": "Later."}, text[2])
+        self.assertEqual(
+            ["/synthesis-sessions/session-one/finish", "/synthesis-sessions/session-one"],
+            [request[1] for request in backend.requests if request[0] != "POST" or request[1].endswith("/finish")],
+        )
+
+    def test_session_audio_holds_synthesis_slot_but_control_does_not_deadlock(self) -> None:
+        backend = self._start_backend()
+        backend.stream_chunks = [b"RIFF\x00\x00\x00\x00WAVEfirst", b"second"]
+        backend.block_stream_after_first = True
+        server = self._start_proxy()
+        self._profile("profiles", "saved-one")
+        self._state(session_profile=None, session_candidate=False, default_profile="saved-one")
+
+        create_status, _, _ = self._request(
+            server, "POST", "/synthesis-sessions", {"text": "First."}
+        )
+        self.assertEqual(201, create_status)
+        connection, response = self._session_audio_request(server, "session-one")
+        self.addCleanup(connection.close)
+        self.assertEqual(200, response.status)
+        self.assertEqual(b"RIFF\x00\x00\x00\x00WAVEfirst", response.read(17))
+        self.assertTrue(backend.first_stream_chunk.wait(1))
+
+        text_status, _, _ = self._request(
+            server, "POST", "/synthesis-sessions/session-one/text", {"text": "Later."}
+        )
+        finish_status, _, _ = self._request(
+            server, "POST", "/synthesis-sessions/session-one/finish"
+        )
+        delete_status, _, _ = self._request(
+            server, "DELETE", "/synthesis-sessions/session-one"
+        )
+        self.assertEqual(204, text_status)
+        self.assertEqual(204, finish_status)
+        self.assertEqual(204, delete_status)
+
+        backend.release.set()
+        self.assertEqual(b"second", response.read())
+
+    def test_session_routes_reject_invalid_ids_and_bound_control_text(self) -> None:
+        backend = self._start_backend()
+        server = self._start_proxy()
+        self._profile("profiles", "saved-one")
+        self._state(session_profile=None, session_candidate=False, default_profile="saved-one")
+
+        invalid_status, _, _ = self._request(
+            server, "GET", "/synthesis-sessions/not%2Fopaque/audio"
+        )
+        bounded_status, _, _ = self._request(
+            server,
+            "POST",
+            "/synthesis-sessions/session-one/text",
+            {"text": "x" * self.proxy.MAX_BODY},
+        )
+
+        self.assertEqual(404, invalid_status)
+        self.assertEqual(413, bounded_status)
+        self.assertEqual([], backend.requests)
 
     def test_server_threads_do_not_block_shutdown(self) -> None:
         self.assertTrue(self.proxy.Server.daemon_threads)

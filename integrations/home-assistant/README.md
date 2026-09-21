@@ -23,6 +23,14 @@ The Home Assistant provider accepts no caller-selected voice. At request time, t
   may remain buffered under HA's own streaming threshold. Fallback may occur
   only before audio starts; a mid-stream failure ends the utterance rather than
   replaying it in a different voice.
+- `continuous_sentence_streaming` is enabled by default. It opens
+  one bounded backend session and one WAV response, then appends completed text
+  sentences to that session. `multi_sentence_streaming` is the older multi-feed
+  mode that mobile clients truncated after the first segment; leave it disabled.
+- Synthesis sessions default to 8 active sessions, 8 queued sentences, 16 KiB
+  total text, a 30-second idle timeout, and a 300-second total timeout. The
+  corresponding `COSYVOICE_SYNTHESIS_SESSION_*` environment variables can lower
+  these bounds without changing the API.
 - Node-RED credentials are loaded by name from `/config/secrets.yaml`; no inline
   credential or spoken text is written to source or latency logs.
 

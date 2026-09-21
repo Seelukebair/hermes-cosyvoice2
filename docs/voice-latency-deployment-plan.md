@@ -40,6 +40,19 @@ mobile playback/listening approval remains operator-owned.
 Review date: 2026-09-20 America/Anchorage.
 Repository baseline: `42ec691b0d47533c903f9e4a08ffc6377339487d`.
 
+### CVL-06: One-response sentence pipeline
+
+Status: implemented and automated tests passed; live mobile listening remains
+the promotion gate.
+
+Completed answer sentences are queued into a bounded runtime synthesis session.
+The backend retains one selected profile and one continuous WAV response while
+serially synthesizing each sentence. This replaces the mobile-incompatible
+multi-feed experiment without joining or rewriting the full response. Session
+capacity, queue size, retained text, idle time, and total time are bounded;
+disconnects cancel promptly and fallback remains available until the model has
+produced the first audio chunk.
+
 ## Outcome and boundaries
 
 Make Home Assistant voice replies start sooner while preserving the selected

@@ -65,13 +65,21 @@ class FakeContent:
 class FakeResponse:
     """Response object accepted by the integration's request context."""
 
-    def __init__(self, data: bytes, *, status: int = 200, fail_after_chunks: int | None = None):
+    def __init__(
+        self,
+        data: bytes,
+        *,
+        status: int = 200,
+        text: str = "bridge error",
+        fail_after_chunks: int | None = None,
+    ):
         self.status = status
         self.content = FakeContent(data, fail_after_chunks=fail_after_chunks)
+        self._text = text
         self.closed = False
 
     async def text(self) -> str:
-        return "bridge error"
+        return self._text
 
     def close(self) -> None:
         self.closed = True
@@ -111,6 +119,30 @@ class SequencedSession:
     def post(self, url: str, **kwargs) -> FakeRequestContext:
         self.calls.append((url, kwargs))
         return self.contexts[len(self.calls) - 1]
+
+
+class RoutingSession:
+    """Route session protocol calls while retaining their exact order and data."""
+
+    def __init__(self, responses: dict[tuple[str, str], list[FakeResponse]]) -> None:
+        self._responses = {
+            key: [FakeRequestContext(response) for response in value]
+            for key, value in responses.items()
+        }
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def _request(self, method: str, url: str, **kwargs) -> FakeRequestContext:
+        self.calls.append((method, url, kwargs))
+        return self._responses[(method, url)].pop(0)
+
+    def post(self, url: str, **kwargs) -> FakeRequestContext:
+        return self._request("post", url, **kwargs)
+
+    def get(self, url: str, **kwargs) -> FakeRequestContext:
+        return self._request("get", url, **kwargs)
+
+    def delete(self, url: str, **kwargs) -> FakeRequestContext:
+        return self._request("delete", url, **kwargs)
 
 
 def _install_homeassistant_stubs() -> None:
@@ -208,6 +240,9 @@ class TtsStreamTests(unittest.IsolatedAsyncioTestCase):
         entity._token = "test-token"
         entity._fallback_entity_id = "tts.kokoro"
         entity._request_timeout = 30
+        # Most tests below exercise the original buffered or legacy paths.
+        # Continuous-session cases enable the production default explicitly.
+        entity._continuous_sentence_streaming = False
         return entity
 
     def test_empty_options_use_global_default_speed(self) -> None:
@@ -260,6 +295,9 @@ class TtsStreamTests(unittest.IsolatedAsyncioTestCase):
             "First sentence. Second sentence.",
             entity.hass.session.calls[0][1]["json"]["text"],
         )
+
+    def test_continuous_sentence_streaming_is_enabled_by_default(self) -> None:
+        self.assertTrue(TTS.DEFAULT_CONTINUOUS_SENTENCE_STREAMING)
 
     async def test_invalid_header_uses_fallback_before_audio(self) -> None:
         response = FakeResponse(b"NOTW" + (b"\x00" * 40))
@@ -319,6 +357,131 @@ class TtsStreamTests(unittest.IsolatedAsyncioTestCase):
                     "en-US",
                     {"instruct": "x" * TTS.MAX_STREAM_REQUEST_BYTES},
                     _message(["short message"]),
+                )
+            )
+        self.assertEqual([], entity.hass.session.calls)
+
+    async def test_continuous_session_uses_one_audio_stream_for_many_sentences(self) -> None:
+        entity = self._entity(FakeResponse(WAV_HEADER))
+        entity._continuous_sentence_streaming = True
+        session_url = "http://bridge/synthesis-sessions/session-1"
+        entity.hass.session = RoutingSession(
+            {
+                (
+                    "post",
+                    "http://bridge/synthesis-sessions",
+                ): [FakeResponse(b"", status=201, text='{"session_id":"session-1"}')],
+                ("get", session_url + "/audio"): [FakeResponse(WAV_HEADER + b"pcm")],
+                ("post", session_url + "/text"): [FakeResponse(b"", status=204)],
+                ("post", session_url + "/finish"): [FakeResponse(b"", status=204)],
+            }
+        )
+
+        result = await entity.async_stream_tts_audio(
+            TTSAudioRequest("en-US", {}, _message(["First sentence. Sec", "ond sentence!"]))
+        )
+
+        self.assertEqual(WAV_HEADER + b"pcm", await _consume(result.data_gen))
+        audio_calls = [call for call in entity.hass.session.calls if call[0] == "get"]
+        self.assertEqual(1, len(audio_calls))
+        create = entity.hass.session.calls[0]
+        self.assertEqual("First sentence.", create[2]["json"]["text"])
+        text_calls = [call for call in entity.hass.session.calls if call[1].endswith("/text")]
+        self.assertEqual(["Second sentence!"], [call[2]["json"]["text"] for call in text_calls])
+        self.assertTrue(any(call[1].endswith("/finish") for call in entity.hass.session.calls))
+
+    async def test_continuous_session_falls_back_before_audio(self) -> None:
+        entity = self._entity(FakeResponse(WAV_HEADER))
+        entity._continuous_sentence_streaming = True
+        session_url = "http://bridge/synthesis-sessions/session-2"
+        entity.hass.session = RoutingSession(
+            {
+                (
+                    "post",
+                    "http://bridge/synthesis-sessions",
+                ): [FakeResponse(b"", status=201, text='{"session_id":"session-2"}')],
+                ("get", session_url + "/audio"): [FakeResponse(b"NOTW" + (b"\x00" * 40))],
+                ("post", session_url + "/text"): [FakeResponse(b"", status=204)],
+                ("post", session_url + "/finish"): [FakeResponse(b"", status=204)],
+                ("delete", session_url): [FakeResponse(b"", status=204)],
+            }
+        )
+
+        async def fallback(message: str):
+            self.assertEqual("First sentence. Second sentence!", message)
+            return "mp3", b"fallback"
+
+        entity._async_get_fallback_audio = fallback
+        result = await entity.async_stream_tts_audio(
+            TTSAudioRequest("en-US", {}, _message(["First sentence. Second sentence!"]))
+        )
+
+        self.assertEqual("mp3", result.extension)
+        self.assertEqual(b"fallback", await _consume(result.data_gen))
+        self.assertTrue(any(call[0] == "delete" for call in entity.hass.session.calls))
+
+    async def test_continuous_session_does_not_fallback_after_header(self) -> None:
+        entity = self._entity(FakeResponse(WAV_HEADER))
+        entity._continuous_sentence_streaming = True
+        session_url = "http://bridge/synthesis-sessions/session-3"
+        entity.hass.session = RoutingSession(
+            {
+                (
+                    "post",
+                    "http://bridge/synthesis-sessions",
+                ): [FakeResponse(b"", status=201, text='{"session_id":"session-3"}')],
+                ("get", session_url + "/audio"): [
+                    FakeResponse(WAV_HEADER + b"pcm", fail_after_chunks=1)
+                ],
+                ("post", session_url + "/finish"): [FakeResponse(b"", status=204)],
+                ("delete", session_url): [FakeResponse(b"", status=204)],
+            }
+        )
+
+        async def forbidden_fallback(message: str):
+            raise AssertionError("fallback must not run after audio starts")
+
+        entity._async_get_fallback_audio = forbidden_fallback
+        result = await entity.async_stream_tts_audio(
+            TTSAudioRequest("en-US", {}, _message(["Only sentence."]))
+        )
+
+        self.assertEqual(WAV_HEADER + b"pcm", await _consume(result.data_gen))
+        self.assertTrue(any(call[0] == "delete" for call in entity.hass.session.calls))
+
+    async def test_continuous_session_disconnect_cancels_and_deletes(self) -> None:
+        entity = self._entity(FakeResponse(WAV_HEADER))
+        entity._continuous_sentence_streaming = True
+        session_url = "http://bridge/synthesis-sessions/session-4"
+        entity.hass.session = RoutingSession(
+            {
+                (
+                    "post",
+                    "http://bridge/synthesis-sessions",
+                ): [FakeResponse(b"", status=201, text='{"session_id":"session-4"}')],
+                ("get", session_url + "/audio"): [FakeResponse(WAV_HEADER + b"pcm")],
+                ("delete", session_url): [FakeResponse(b"", status=204)],
+            }
+        )
+
+        result = await entity.async_stream_tts_audio(
+            TTSAudioRequest("en-US", {}, _message(["First sentence. Later sentence."]))
+        )
+        await anext(result.data_gen)
+        await result.data_gen.aclose()
+
+        self.assertTrue(any(call[0] == "delete" for call in entity.hass.session.calls))
+
+    async def test_continuous_session_enforces_first_request_bound(self) -> None:
+        entity = self._entity(FakeResponse(WAV_HEADER))
+        entity._continuous_sentence_streaming = True
+
+        with self.assertRaises(HomeAssistantError):
+            await entity.async_stream_tts_audio(
+                TTSAudioRequest(
+                    "en-US",
+                    {"instruct": "x" * TTS.MAX_STREAM_REQUEST_BYTES},
+                    _message(["First sentence."]),
                 )
             )
         self.assertEqual([], entity.hass.session.calls)

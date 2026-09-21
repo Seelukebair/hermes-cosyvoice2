@@ -30,6 +30,7 @@ BACKEND_TIMEOUT = 330
 STREAM_READ_SIZE = 16 * 1024
 MAX_ERROR_BODY = 4096
 PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 def _positive_env_int(name: str, default: int) -> int:
@@ -45,6 +46,9 @@ def _positive_env_int(name: str, default: int) -> int:
 
 MAX_CONCURRENT_REQUESTS = _positive_env_int(
     "JARVIS_COSYVOICE_MAX_CONCURRENT_REQUESTS", 2
+)
+MAX_CONCURRENT_CONTROL_REQUESTS = _positive_env_int(
+    "JARVIS_COSYVOICE_MAX_CONCURRENT_CONTROL_REQUESTS", 4
 )
 
 
@@ -113,6 +117,7 @@ class Server(ThreadingHTTPServer):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.proxy_slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+        self.control_slots = threading.BoundedSemaphore(MAX_CONCURRENT_CONTROL_REQUESTS)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -140,6 +145,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if not self._authenticate():
             return
+        session_route = self._session_route()
+        if session_route is not None and session_route[1] == "audio":
+            session_id, _ = session_route
+            self._forward_stream(
+                "GET", f"/synthesis-sessions/{session_id}/audio", None
+            )
+            return
         if self.path == "/proxy-health":
             self._json(
                 200,
@@ -159,47 +171,129 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if not self._authenticate():
             return
-        if self.path not in {"/synthesize", "/synthesize-stream"}:
+        if self.path in {"/synthesize", "/synthesize-stream", "/synthesis-sessions"}:
+            payload = self._read_text_payload()
+            if payload is None:
+                return
+            profile_id = _selected_profile()
+            if profile_id is None:
+                self._json(
+                    503,
+                    {
+                        "error": "voice_profile_unavailable",
+                        "detail": "No shared CosyVoice profile is configured",
+                    },
+                )
+                return
+            # Resolve the shared selector exactly once for each request/session.
+            # A synthesis session retains this explicit saved-profile id at
+            # creation; later text and audio routes never consult mutable state.
+            payload["voice"] = profile_id
+            body = json.dumps(payload, separators=(",", ":")).encode()
+            if len(body) > MAX_BODY:
+                self.send_error(413)
+                return
+            if self.path == "/synthesize-stream":
+                self._forward_stream("POST", "/synthesize-stream", body)
+                return
+            if self.path == "/synthesis-sessions":
+                self._forward("POST", "/synthesis-sessions", body)
+                return
+            self._forward("POST", "/synthesize", body)
+            return
+
+        session_route = self._session_route()
+        if session_route is not None and session_route[1] == "text":
+            payload = self._read_text_payload()
+            if payload is None:
+                return
+            session_id, _ = session_route
+            body = json.dumps(payload, separators=(",", ":")).encode()
+            if len(body) > MAX_BODY:
+                self.send_error(413)
+                return
+            self._forward_control(
+                "POST", f"/synthesis-sessions/{session_id}/text", body
+            )
+            return
+        if session_route is not None and session_route[1] == "finish":
+            if not self._read_empty_body():
+                return
+            session_id, _ = session_route
+            self._forward_control("POST", f"/synthesis-sessions/{session_id}/finish", None)
+            return
+        self.send_error(404)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        if not self._authenticate():
+            return
+        session_route = self._session_route()
+        if session_route is None or session_route[1] != "":
             self.send_error(404)
             return
+        if not self._read_empty_body():
+            return
+        session_id, _ = session_route
+        self._forward_control("DELETE", f"/synthesis-sessions/{session_id}", None)
+
+    def _session_route(self) -> tuple[str, str] | None:
+        """Return a validated, query-free opaque session path."""
+        parsed = urlsplit(self.path)
+        if parsed.query or parsed.fragment:
+            return None
+        parts = parsed.path.split("/")
+        if len(parts) not in (3, 4) or parts[:2] != ["", "synthesis-sessions"]:
+            return None
+        session_id = parts[2]
+        if not SESSION_ID.fullmatch(session_id):
+            return None
+        suffix = parts[3] if len(parts) == 4 else ""
+        if suffix not in {"", "audio", "text", "finish"}:
+            return None
+        return session_id, suffix
+
+    def _read_text_payload(self) -> dict | None:
+        """Read one bounded JSON text payload without logging its contents."""
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             self.send_error(400)
-            return
+            return None
         if length <= 0 or length > MAX_BODY:
             self.send_error(413)
-            return
+            return None
         body = self.rfile.read(length)
         try:
             payload = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError):
             self.send_error(400)
-            return
+            return None
         if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
             self.send_error(400)
-            return
-        profile_id = _selected_profile()
-        if profile_id is None:
-            self._json(
-                503,
-                {
-                    "error": "voice_profile_unavailable",
-                    "detail": "No shared CosyVoice profile is configured",
-                },
-            )
-            return
-        # Resolve the shared selector here and forward the saved id explicitly.
-        # This prevents the backend's one-shot preview selector from affecting HA.
-        payload["voice"] = profile_id
-        body = json.dumps(payload, separators=(",", ":")).encode()
-        if self.path == "/synthesize-stream":
-            self._forward_stream("POST", "/synthesize-stream", body)
-            return
-        self._forward("POST", "/synthesize", body)
+            return None
+        return payload
 
-    def _forward(self, method: str, path: str, body: bytes | None) -> None:
-        if not self.server.proxy_slots.acquire(blocking=False):
+    def _read_empty_body(self) -> bool:
+        """Reject unexpected control payloads while retaining request bounds."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_error(400)
+            return False
+        if length != 0:
+            self.send_error(413 if length > MAX_BODY else 400)
+            return False
+        return True
+
+    def _forward(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        slots: threading.BoundedSemaphore | None = None,
+    ) -> None:
+        slots = slots or self.server.proxy_slots
+        if not slots.acquire(blocking=False):
             self._json(
                 503,
                 {
@@ -232,9 +326,13 @@ class Handler(BaseHTTPRequestHandler):
             if connection is not None:
                 connection.close()
             self.close_connection = True
-            self.server.proxy_slots.release()
+            slots.release()
 
-    def _forward_stream(self, method: str, path: str, body: bytes) -> None:
+    def _forward_control(self, method: str, path: str, body: bytes | None) -> None:
+        """Forward short session operations independently of a held audio slot."""
+        self._forward(method, path, body, self.server.control_slots)
+
+    def _forward_stream(self, method: str, path: str, body: bytes | None) -> None:
         """Pass a backend audio stream through without response buffering.
 
         ``http.client`` de-chunks an upstream HTTP/1.1 response as it is read.
@@ -264,7 +362,7 @@ class Handler(BaseHTTPRequestHandler):
                 method,
                 path,
                 body=body,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json"} if body is not None else {},
             )
             response = connection.getresponse()
             if response.status != 200:
