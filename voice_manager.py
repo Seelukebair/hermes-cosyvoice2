@@ -22,13 +22,23 @@ from urllib.parse import urlparse
 
 
 class VoiceWorkflowError(RuntimeError):
-    def __init__(self, stage: str, code: str, summary: str, *, retryable: bool = False, choices: list[dict[str, Any]] | None = None, diagnostics: dict[str, Any] | None = None) -> None:
+    def __init__(self, stage: str, code: str, summary: str, *, retryable: bool = False, hint: str = "", choices: list[dict[str, Any]] | None = None, diagnostics: dict[str, Any] | None = None) -> None:
         super().__init__(summary)
         self.stage, self.code, self.summary = stage, code, summary
-        self.retryable, self.choices, self.diagnostics = retryable, choices or [], diagnostics or {}
+        self.retryable, self.hint = retryable, hint
+        self.choices, self.diagnostics = choices or [], diagnostics or {}
 
     def as_result(self) -> dict[str, Any]:
-        return {"status": "error", "stage": self.stage, "code": self.code, "summary": self.summary, "retryable": self.retryable, "choices": self.choices, "diagnostics": self.diagnostics}
+        return {
+            "status": "error",
+            "stage": self.stage,
+            "code": self.code,
+            "summary": self.summary,
+            "hint": self.hint,
+            "retryable": self.retryable,
+            "choices": self.choices,
+            "diagnostics": self.diagnostics,
+        }
 
 
 def _slug(value: str) -> str:
@@ -114,6 +124,7 @@ class VoiceManager:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def dispatch(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        profile_reference = lambda: self._resolve_profile_argument(action, args)
         handlers = {
             "status": self.status, "list": self.list_profiles,
             "search": lambda: self.search(str(args.get("query") or "")),
@@ -131,19 +142,78 @@ class VoiceManager:
                 str(args.get("name") or args.get("query") or "Custom voice"), args.get("start_seconds"),
                 str(args.get("prompt_text") or ""), str(args.get("profile_id") or ""),
             ),
-            "refine": lambda: self.refine(str(args.get("profile_id") or ""), str(args.get("style_choice") or "")),
+            "select": lambda: self.select(profile_reference()),
+            "refine": lambda: self.refine(profile_reference(), str(args.get("style_choice") or "")),
             "set_personality": lambda: self.set_personality(
-                str(args.get("profile_id") or ""),
+                profile_reference(),
                 bool(args.get("enabled", True)),
                 str(args.get("personality_prompt") or ""),
             ),
-            "accept": lambda: self.accept(str(args.get("profile_id") or ""), str(args.get("style_choice") or "original"), True, False),
-            "set_default": lambda: self.accept(str(args.get("profile_id") or ""), str(args.get("style_choice") or "original"), True, True),
-            "reset": self.reset, "discard": lambda: self.discard(str(args.get("profile_id") or "")),
+            "accept": lambda: self.accept(profile_reference(), str(args.get("style_choice") or "original"), True, False),
+            "set_default": lambda: self.accept(profile_reference(), str(args.get("style_choice") or "original"), True, True),
+            "reset": self.reset, "discard": lambda: self.discard(profile_reference()),
         }
         if action not in handlers:
             raise VoiceWorkflowError("dispatch", "UNKNOWN_ACTION", f"Unknown action: {action}")
         return handlers[action]()
+
+    def _resolve_profile_argument(self, action: str, args: dict[str, Any]) -> str:
+        reference = str(args.get("profile_id") or args.get("name") or "").strip()
+        profiles = self._profile_summaries()
+        choices = [
+            {
+                "action": action,
+                "profile_id": str(profile["id"]),
+                "label": str(profile.get("name") or profile["id"]),
+            }
+            for profile in profiles[:25]
+            if profile.get("id")
+        ]
+        if not reference:
+            raise VoiceWorkflowError(
+                "profile",
+                "PROFILE_REQUIRED",
+                f"Use action={action!r} with profile_id from action='list'; "
+                "the name field is accepted only as a compatibility alias.",
+                hint="Call action='list', choose the intended saved profile, then retry the suggested call unchanged.",
+                choices=choices,
+                diagnostics={
+                    "expected_call": {
+                        "action": action,
+                        "profile_id": choices[0]["profile_id"] if choices else "saved-profile-id",
+                    }
+                },
+            )
+        if self._profile_exists(reference, self.profiles) or self._profile_exists(
+            reference, self.candidates
+        ):
+            return reference
+
+        requested = self._identity_key(reference)
+        matches = []
+        for profile in profiles:
+            identity_values = {
+                self._identity_key(str(profile.get("id") or "")),
+                self._identity_key(str(profile.get("name") or "")),
+                self._identity_key(str(profile.get("personality_label") or "")),
+            } - {""}
+            if requested in identity_values or any(
+                value in requested or requested in value for value in identity_values
+            ):
+                matches.append(str(profile["id"]))
+        matches = list(dict.fromkeys(matches))
+        if len(matches) == 1:
+            return matches[0]
+        code = "PROFILE_AMBIGUOUS" if matches else "PROFILE_NOT_FOUND"
+        raise VoiceWorkflowError(
+            "profile",
+            code,
+            f"Could not resolve {reference!r} to one saved profile. Call action='list', "
+            f"then retry action={action!r} with its exact profile_id.",
+            hint="Use one of the listed profile_id values; do not retry the unresolved name.",
+            choices=choices,
+            diagnostics={"reference": reference, "matching_profile_ids": matches},
+        )
 
     def create(
         self,
@@ -654,6 +724,32 @@ class VoiceManager:
             "status": "saved", "stage": "complete",
             "summary": f"Saved {metadata['name']}" + (" and made it the default voice." if make_default else " for the current session."),
             "profile": metadata, "default": make_default, "selection": selection,
+            "persistence_verified": persistence_verified,
+        }
+
+    def select(self, profile_id: str) -> dict[str, Any]:
+        source, metadata = self._profile_source(profile_id)
+        if source.parent != self.profiles:
+            raise VoiceWorkflowError(
+                "profile",
+                "PROFILE_NOT_SAVED",
+                "Prepared candidates must be accepted before they can become the persistent session voice.",
+                choices=[{"action": "accept", "profile_id": profile_id, "label": "Accept candidate"}],
+            )
+        self._set_state(
+            session_profile=profile_id,
+            candidate=False,
+            preserve_default=True,
+        )
+        selection = self._selection_report()
+        persistence_verified = selection.get("selected_profile_id") == profile_id
+        return {
+            "status": "selected",
+            "stage": "complete",
+            "summary": f"Selected {metadata['name']} for the current session.",
+            "profile": metadata,
+            "default": False,
+            "selection": selection,
             "persistence_verified": persistence_verified,
         }
 

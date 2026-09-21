@@ -63,6 +63,43 @@ class IntentHookTests(unittest.TestCase):
                 else:
                     os.environ["COSYVOICE_VOICE_ROOT"] = old
 
+    def test_switch_repairs_name_field_and_wrong_personality_action(self) -> None:
+        plugin = _load_plugin()
+        manager = plugin._manager()
+        profile_id = "samuel-l-jackson-heavy-cinema-1d441fb2"
+        profile = manager.profiles / profile_id
+        profile.mkdir(parents=True)
+        (profile / "reference.wav").write_bytes(b"RIFF")
+        manager._write_json(
+            profile / "profile.json",
+            {
+                "id": profile_id,
+                "name": "Samuel L. Jackson",
+                "prompt_text": "Reference words.",
+                "transcript": {"accepted": True},
+                "personality": {
+                    "enabled": True,
+                    "label": "Samuel L. Jackson",
+                    "paired_with_voice": True,
+                },
+            },
+        )
+        context = plugin._voice_intent_context(
+            user_message="Change your voice to Samuel L. Jackson.",
+            turn_id="switch-samuel",
+        )
+
+        directive = plugin._guard_voice_tool(
+            tool_name="cosyvoice_voice",
+            args={"action": "set_personality", "name": profile_id},
+            turn_id="switch-samuel",
+        )
+
+        self.assertIn("`select` once", context["context"])
+        self.assertEqual("modify", directive["action"])
+        self.assertEqual("select", directive["args"]["action"])
+        self.assertEqual(profile_id, directive["args"]["profile_id"])
+
     def test_creation_request_delegates_source_without_proceed_prompt(self) -> None:
         plugin = _load_plugin()
         result = plugin._voice_intent_context(

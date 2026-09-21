@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.11.2
+
+- Add an explicit `select` action for switching to an existing saved voice and
+  its paired personality without changing the persistent default.
+- Repair common saved-profile calls that put an ID in `name` or incorrectly use
+  `set_personality`, and resolve unambiguous friendly names for compatibility.
+- Return explicit recovery hints and copyable profile choices when a profile is
+  missing, unknown, or ambiguous.
+
 ## 1.11.1
 
 - Align the Hermes command provider and Home Assistant TTS defaults at 1.20x

@@ -12,7 +12,7 @@ from array import array
 from pathlib import Path
 from unittest import mock
 
-from voice_manager import VoiceManager, _character_label
+from voice_manager import VoiceManager, VoiceWorkflowError, _character_label
 
 
 class VoiceManagerTests(unittest.TestCase):
@@ -200,6 +200,39 @@ class VoiceManagerTests(unittest.TestCase):
             self.assertEqual(profile_id, reloaded.status()["selection"]["selected_profile_id"])
             self.assertFalse(reloaded.status()["selection"]["is_fallback"])
             self.assertEqual(profile_id, reloaded.personality_context()["profile_id"])
+
+    def test_select_resolves_friendly_name_and_preserves_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = VoiceManager(Path(tmp), "/missing/yt-dlp")
+            profile_id = self._candidate(manager)
+            manager.accept(profile_id, "original", True, True)
+            manager.reset()
+
+            result = manager.dispatch("select", {"name": "Narrator"})
+
+            self.assertEqual("selected", result["status"])
+            self.assertEqual(profile_id, result["selection"]["selected_profile_id"])
+            self.assertEqual("session+default", result["selection"]["scope"])
+            self.assertTrue(result["persistence_verified"])
+            self.assertEqual(profile_id, manager.status()["state"]["default_profile"])
+
+    def test_missing_profile_error_returns_copyable_recovery_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = VoiceManager(Path(tmp), "/missing/yt-dlp")
+            profile_id = self._candidate(manager)
+            manager.accept(profile_id, "original", True, False)
+
+            with self.assertRaises(VoiceWorkflowError) as raised:
+                manager.dispatch("select", {})
+
+            result = raised.exception.as_result()
+            self.assertEqual("PROFILE_REQUIRED", result["code"])
+            self.assertIn("action='list'", result["hint"])
+            self.assertEqual(
+                {"action": "select", "profile_id": profile_id},
+                result["diagnostics"]["expected_call"],
+            )
+            self.assertEqual(profile_id, result["choices"][0]["profile_id"])
 
     def test_create_reuses_saved_identity_instead_of_duplicating_voice(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

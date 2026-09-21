@@ -172,6 +172,8 @@ def _voice_intent_context(
                 "make_default": bool(_DEFAULT_REQUEST_RE.search(message)),
                 "personality_enabled": not bool(_PERSONALITY_DISABLE_RE.search(message)),
                 "allow_variant": bool(_VARIANT_REQUEST_RE.search(message)),
+                "user_message": message,
+                "creation_requested": bool(_CREATE_VOICE_RE.search(message)),
             }
             while len(_TURN_INTENT) > 1024:
                 _TURN_INTENT.pop(next(iter(_TURN_INTENT)))
@@ -208,8 +210,10 @@ def _voice_intent_context(
             "CosyVoice voice-profile intent detected. Use the deferred `cosyvoice_voice` tool, never invent "
             "sources or claim a profile is active without its result. The plugin skill id is "
             "`cosyvoice-voice:cosyvoice-voice`; do not pass the tool name to `skill_view`. Actions are status, list, "
-            "search, create, prepare, refine, "
-            "set_personality, accept, set_default, reset, and discard. Search results are not profiles. Preparing a "
+            "search, create, prepare, select, refine, "
+            "set_personality, accept, set_default, reset, and discard. To switch to an existing saved voice, call "
+            "`select` once with the exact inventory `profile_id`; selecting also activates that profile's paired "
+            "personality. Search results are not profiles. Preparing a "
             "profile needs a usable local transcript and deterministic signal validation. An explicit authenticated "
             "creation request authorizes source selection and persistence; do not add confirmation or review gates. "
             "Reuse a matching saved profile unless the user explicitly requests a different, newer, alternate, or "
@@ -269,6 +273,27 @@ def _guard_voice_tool(
     action = str(call_args.get("action") or "").lower()
     with _LOCK:
         intent = dict(_TURN_INTENT.get(_turn_key(turn_id, session_id), {}))
+    if not intent.get("creation_requested", False) and action in {
+        "prepare", "accept", "set_personality", "select"
+    }:
+        reference = str(
+            call_args.get("profile_id")
+            or call_args.get("name")
+            or intent.get("user_message")
+            or ""
+        ).strip()
+        if reference:
+            try:
+                profile_id = _manager()._resolve_profile_argument(
+                    "select", {"profile_id": reference}
+                )
+            except VoiceWorkflowError:
+                profile_id = ""
+            if profile_id:
+                return {
+                    "action": "modify",
+                    "args": {"action": "select", "profile_id": profile_id},
+                }
     if action in {"search", "prepare", "create"} and intent.get("autonomous_source", False):
         query = str(intent.get("voice_query") or call_args.get("query") or "").strip()
         source_url = str(intent.get("source_url") or call_args.get("source_url") or "")
@@ -315,10 +340,10 @@ def register(ctx) -> None:
             "name": "cosyvoice_voice",
             "description": "Discover, prepare, validate, preview-state, save, select, or reset CosyVoice reference voice profiles.",
             "parameters": {"type": "object", "required": ["action"], "properties": {
-                "action": {"type": "string", "enum": ["status", "list", "search", "create", "prepare", "refine", "set_personality", "accept", "set_default", "reset", "discard"]},
+                "action": {"type": "string", "enum": ["status", "list", "search", "create", "prepare", "select", "refine", "set_personality", "accept", "set_default", "reset", "discard"]},
                 "query": {"type": "string", "description": "Requested voice or YouTube search phrase."},
                 "source_url": {"type": "string", "description": "Selected http(s) YouTube URL."},
-                "profile_id": {"type": "string", "description": "Prepared or saved profile identifier."},
+                "profile_id": {"type": "string", "description": "Exact prepared or saved profile identifier returned by list. Required for select and other profile actions."},
                 "name": {"type": "string", "description": "User-facing profile name."},
                 "start_seconds": {"type": "number", "description": "Optional preferred source offset."},
                 "prompt_text": {"type": "string", "description": "Optional corrected transcript of the reference audio."},

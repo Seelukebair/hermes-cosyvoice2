@@ -11,6 +11,12 @@ When the user asks which cloned voices or voice profiles are available, call
 `cosyvoice_voice` with `action=list` and report friendly names. Mark the active
 session voice and persistent default; do not answer from memory.
 
+When the user asks to switch to an existing voice, call `list` when needed to
+resolve the friendly name, then call `select` exactly once with the returned
+`profile_id`. `select` activates both the saved voice and its paired personality
+for the current session without changing the persistent default. Do not use
+`set_personality`, `prepare`, or `accept` to switch an already saved profile.
+
 1. An authenticated explicit make/build/create/clone request authorizes the
    whole workflow. Use `create` with the requested voice as `query`, a concise
    profile `name`, `make_default=true` when requested, and `enabled=true` unless
@@ -70,8 +76,9 @@ session voice and persistent default; do not answer from memory.
    the same character or alter the shared template. Profile-specific
    instructions may explicitly allow theatrical delivery when requested.
    Do not alter `SOUL.md`; presentation stays profile-scoped.
-5. Read tool errors and present their structured `choices`; do not invent a
-   recovery path.
+5. Read tool errors and present their structured `choices`; each profile error
+   includes a corrected action and `profile_id` that can be retried directly.
+   Do not repeat an unchanged failed call or invent a recovery path.
 
 The plugin stores profile selections only. A prepared selection is a one-shot
 preview lease for the next default TTS call once an adapter is installed. That
