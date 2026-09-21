@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.11.3
+
+- Recognize natural saved-profile switch requests including plural voice and
+  persona wording, possessive phrasing, and requests to hear a saved identity.
+- Resolve minor profile-name misspellings only when one saved profile is a
+  clear fuzzy match.
+- Apply unambiguous authenticated switches before generation so the outgoing
+  personality cannot refuse or override the requested profile change.
+
 ## 1.11.2
 
 - Add an explicit `select` action for switching to an existing saved voice and

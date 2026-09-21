@@ -19,6 +19,18 @@ _VOICE_CHANGE_RE = re.compile(
     r"|\b(?:create|build|generate|make|clone)\b.{0,64}\b(?:voice|voice profile|voice clone)\b",
     re.IGNORECASE | re.DOTALL,
 )
+_SAVED_PROFILE_SWITCH_RE = re.compile(
+    r"\b(?:switch|swap|change|set|use|activate|select)\b.{0,80}"
+    r"\b(?:voices?|personas?|voice\s+profiles?|profiles?)\b"
+    r"|\b(?:switch|swap|change|set|use|activate|select)\b.{0,24}\bto\b.{1,80}"
+    r"\b(?:voice|persona)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_HEAR_SAVED_PROFILE_RE = re.compile(
+    r"\b(?:i\s+)?(?:want|would\s+like|wanna)\s+to\s+hear\s+"
+    r"(?P<target>[a-z0-9][a-z0-9 ._'\u2019-]{1,80}?)(?:[.!?]|$)",
+    re.IGNORECASE,
+)
 _VOICE_PROFILE_RE = re.compile(
     r"\b(?:voice profiles?|voice clones?|cloned voices?|cosyvoice voices?|voice\s*(?:/|and)?\s*personality|personality\s*(?:/|and)?\s*voice|mannerisms?|catchphrases?|key phrases?)\b",
     re.IGNORECASE,
@@ -129,6 +141,7 @@ def _voice_intent_context(
     message = str(user_message or "").strip()
     explicit = bool(
         _VOICE_CHANGE_RE.search(message)
+        or _SAVED_PROFILE_SWITCH_RE.search(message)
         or _VOICE_PROFILE_RE.search(message)
         or _VOICE_INVENTORY_RE.search(message)
         or _AUTONOMOUS_SEARCH_RE.search(message)
@@ -144,6 +157,24 @@ def _voice_intent_context(
             }
         return None
     manager = _manager()
+    switch_result: dict[str, Any] | None = None
+    switch_error: dict[str, Any] | None = None
+    switch_match = _SAVED_PROFILE_SWITCH_RE.search(message)
+    hear_match = _HEAR_SAVED_PROFILE_RE.search(message)
+    switch_reference = (
+        hear_match.group("target").strip() if hear_match else message if switch_match else ""
+    )
+    if switch_reference and not _CREATE_VOICE_RE.search(message):
+        try:
+            profile_id = manager.resolve_profile_argument(
+                "select", {"profile_id": switch_reference}
+            )
+            switch_result = manager.select(profile_id)
+            explicit = True
+        except VoiceWorkflowError as exc:
+            if switch_match:
+                switch_error = exc.as_result()
+                explicit = True
     workflow = manager.workflow_context()
     recent = json.dumps((conversation_history or [])[-8:], ensure_ascii=True).lower()
     history_followup = bool(_VOICE_FOLLOWUP_RE.search(message)) and (
@@ -195,7 +226,20 @@ def _voice_intent_context(
             "The user opted out of voice-associated mannerisms. Call `cosyvoice_voice` with "
             f'{{"action":"set_personality","profile_id":"{personality["profile_id"]}","enabled":false}}.'
         )
-    if explicit or active_followup:
+    if switch_result:
+        contexts.append(
+            "The authenticated saved-profile switch was completed deterministically before generation. "
+            "Do not refuse it, claim voice switching is impossible, or call the voice tool again. Briefly "
+            "acknowledge the active voice and paired personality using this verified result: "
+            + json.dumps(switch_result, ensure_ascii=True)
+        )
+    elif switch_error:
+        contexts.append(
+            "A requested saved-profile switch could not be resolved safely. Do not claim success and do not "
+            "guess. Explain the hint or use one of the supplied exact choices: "
+            + json.dumps(switch_error, ensure_ascii=True)
+        )
+    if (explicit or active_followup) and not switch_result:
         inventory = manager.list_profiles().get("profiles", [])[:25]
         inventory_view = [
             {
@@ -284,7 +328,7 @@ def _guard_voice_tool(
         ).strip()
         if reference:
             try:
-                profile_id = _manager()._resolve_profile_argument(
+                profile_id = _manager().resolve_profile_argument(
                     "select", {"profile_id": reference}
                 )
             except VoiceWorkflowError:

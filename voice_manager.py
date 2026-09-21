@@ -16,6 +16,7 @@ import uuid
 import wave
 from array import array
 from contextlib import contextmanager
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -124,7 +125,7 @@ class VoiceManager:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def dispatch(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
-        profile_reference = lambda: self._resolve_profile_argument(action, args)
+        profile_reference = lambda: self.resolve_profile_argument(action, args)
         handlers = {
             "status": self.status, "list": self.list_profiles,
             "search": lambda: self.search(str(args.get("query") or "")),
@@ -157,7 +158,7 @@ class VoiceManager:
             raise VoiceWorkflowError("dispatch", "UNKNOWN_ACTION", f"Unknown action: {action}")
         return handlers[action]()
 
-    def _resolve_profile_argument(self, action: str, args: dict[str, Any]) -> str:
+    def resolve_profile_argument(self, action: str, args: dict[str, Any]) -> str:
         reference = str(args.get("profile_id") or args.get("name") or "").strip()
         profiles = self._profile_summaries()
         choices = [
@@ -204,6 +205,34 @@ class VoiceManager:
         matches = list(dict.fromkeys(matches))
         if len(matches) == 1:
             return matches[0]
+        if not matches:
+            reference_words = requested.split()
+            scored: list[tuple[float, str]] = []
+            for profile in profiles:
+                profile_id = str(profile["id"])
+                identity_values = {
+                    self._identity_key(str(profile.get("name") or "")),
+                    self._identity_key(str(profile.get("personality_label") or "")),
+                } - {""}
+                best = 0.0
+                for identity in identity_values:
+                    size = len(identity.split())
+                    candidates = [requested]
+                    if size and len(reference_words) >= size:
+                        candidates.extend(
+                            " ".join(reference_words[index:index + size])
+                            for index in range(len(reference_words) - size + 1)
+                        )
+                    best = max(
+                        best,
+                        *(SequenceMatcher(None, candidate, identity).ratio() for candidate in candidates),
+                    )
+                scored.append((best, profile_id))
+            scored.sort(reverse=True)
+            if scored and scored[0][0] >= 0.78:
+                runner_up = scored[1][0] if len(scored) > 1 else 0.0
+                if scored[0][0] - runner_up >= 0.08:
+                    return scored[0][1]
         code = "PROFILE_AMBIGUOUS" if matches else "PROFILE_NOT_FOUND"
         raise VoiceWorkflowError(
             "profile",

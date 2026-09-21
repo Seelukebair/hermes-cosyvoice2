@@ -216,6 +216,27 @@ class VoiceManagerTests(unittest.TestCase):
             self.assertTrue(result["persistence_verified"])
             self.assertEqual(profile_id, manager.status()["state"]["default_profile"])
 
+    def test_profile_resolution_tolerates_minor_name_misspellings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = VoiceManager(Path(tmp), "/missing/yt-dlp")
+            profile_id = self._candidate(manager)
+            source = manager.candidates / profile_id / "profile.json"
+            metadata = manager._read_json(source)
+            metadata.update({"name": "Casey Kasem"})
+            metadata["personality"] = {"label": "Casey Kasem", "enabled": True}
+            manager._write_json(source, metadata)
+            manager.accept(profile_id, "original", True, False)
+
+            for reference in (
+                "Casey Kasim",
+                "Casey Kaysim",
+                "Switch voices to Casey Kasim",
+            ):
+                self.assertEqual(
+                    profile_id,
+                    manager.resolve_profile_argument("select", {"name": reference}),
+                )
+
     def test_missing_profile_error_returns_copyable_recovery_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manager = VoiceManager(Path(tmp), "/missing/yt-dlp")

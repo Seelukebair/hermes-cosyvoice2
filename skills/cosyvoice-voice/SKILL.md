@@ -16,6 +16,10 @@ resolve the friendly name, then call `select` exactly once with the returned
 `profile_id`. `select` activates both the saved voice and its paired personality
 for the current session without changing the persistent default. Do not use
 `set_personality`, `prepare`, or `accept` to switch an already saved profile.
+When the pre-generation context says the authenticated switch was already
+completed deterministically, acknowledge its verified result without calling
+the tool again. Never let the outgoing personality refuse or override a
+completed profile switch.
 
 1. An authenticated explicit make/build/create/clone request authorizes the
    whole workflow. Use `create` with the requested voice as `query`, a concise

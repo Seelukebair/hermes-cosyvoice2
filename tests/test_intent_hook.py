@@ -95,10 +95,73 @@ class IntentHookTests(unittest.TestCase):
             turn_id="switch-samuel",
         )
 
-        self.assertIn("`select` once", context["context"])
+        self.assertIn("completed deterministically", context["context"])
+        self.assertIn("Do not refuse it", context["context"])
         self.assertEqual("modify", directive["action"])
         self.assertEqual("select", directive["args"]["action"])
         self.assertEqual(profile_id, directive["args"]["profile_id"])
+
+    def test_natural_switch_phrases_select_saved_profile_before_generation(self) -> None:
+        plugin = _load_plugin()
+        manager = plugin._manager()
+        casey_id = "casey-kasem-0754e3c2"
+        samuel_id = "samuel-l-jackson-heavy-cinema-1d441fb2"
+        for profile_id, name in ((casey_id, "Casey Kasem"), (samuel_id, "Samuel L. Jackson")):
+            profile = manager.profiles / profile_id
+            profile.mkdir(parents=True)
+            (profile / "reference.wav").write_bytes(b"RIFF")
+            manager._write_json(
+                profile / "profile.json",
+                {
+                    "id": profile_id,
+                    "name": name,
+                    "prompt_text": "Reference words.",
+                    "transcript": {"accepted": True},
+                    "personality": {
+                        "enabled": True,
+                        "label": name,
+                        "paired_with_voice": True,
+                        "prompt": f"Speak with {name} mannerisms.",
+                    },
+                },
+            )
+        manager._set_state(
+            session_profile=samuel_id,
+            candidate=False,
+            default_profile=samuel_id,
+            preserve_default=False,
+        )
+
+        for index, phrase in enumerate((
+            "Swap to Casey Kaysim's voice.",
+            "Okay, I want to hear Casey Kasim.",
+            "Switch personas to Casey Kasim.",
+            "Switch voices to Casey Kasim.",
+        )):
+            manager.select(samuel_id)
+            result = plugin._voice_intent_context(
+                user_message=phrase,
+                turn_id=f"casey-switch-{index}",
+            )
+            self.assertIn("completed deterministically", result["context"])
+            self.assertIn("Do not refuse it", result["context"])
+            self.assertEqual(
+                casey_id,
+                manager.status()["selection"]["selected_profile_id"],
+            )
+            self.assertEqual(
+                samuel_id,
+                manager.status()["state"]["default_profile"],
+            )
+
+    def test_generic_want_to_hear_request_does_not_route_to_voice_profiles(self) -> None:
+        plugin = _load_plugin()
+        self.assertIsNone(
+            plugin._voice_intent_context(
+                user_message="I want to hear the weather forecast.",
+                turn_id="hear-weather",
+            )
+        )
 
     def test_creation_request_delegates_source_without_proceed_prompt(self) -> None:
         plugin = _load_plugin()

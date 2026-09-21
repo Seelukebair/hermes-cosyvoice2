@@ -135,10 +135,15 @@ reference and records `fallback_raw` in profile metadata. Use
 `deploy/hermes-gateway-reference-cleaner.conf` to activate it for Hermes.
 - `recent_sources.json`: bounded source authorization used by the acquisition workflow.
 
-The plugin exposes `status`, `list`, `search`, `create`, `prepare`, `refine`,
-`set_personality`, `accept`, `set_default`, `reset`, and `discard` through the
+The plugin exposes `status`, `list`, `search`, `create`, `prepare`, `select`,
+`refine`, `set_personality`, `accept`, `set_default`, `reset`, and `discard` through the
 `cosyvoice_voice` tool. Explicit creation requests may complete acquisition,
 validation, saving, and selection in one call.
+
+Unambiguous requests to switch to a saved voice use a deterministic pre-generation
+fast path. The resolver accepts minor name misspellings only when one inventory
+entry wins clearly; ambiguous or unknown names leave the selector unchanged and
+return actionable choices.
 
 Automatic ASR transcripts are marked `accepted: true, verified: false` because
 they are usable conditioning text but are not human-verified. A corrected user
