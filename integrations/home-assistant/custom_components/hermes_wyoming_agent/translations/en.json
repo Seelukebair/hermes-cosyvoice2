@@ -7,6 +7,8 @@
         "data": {
           "node_red_url": "Node-RED URL",
           "node_red_credentials": "Node-RED credential reference",
+          "hermes_url": "Hermes streaming API URL",
+          "hermes_credentials": "Hermes API credential reference",
           "stall_ack_seconds": "Stall acknowledgement delay",
           "stall_ack_text": "Stall acknowledgement text"
         }
@@ -26,6 +28,8 @@
         "data": {
           "node_red_url": "Node-RED URL",
           "node_red_credentials": "Node-RED credential reference",
+          "hermes_url": "Hermes streaming API URL",
+          "hermes_credentials": "Hermes API credential reference",
           "stall_ack_seconds": "Stall acknowledgement delay",
           "stall_ack_text": "Stall acknowledgement text"
         }

@@ -133,8 +133,11 @@ class HermesWyomingAgent(
                     emitted = False
                     try:
                         async for delta in self._stream_from_hermes(user_input, request_id):
+                            item = {"content": delta}
+                            if not emitted:
+                                item["role"] = "assistant"
                             emitted = True
-                            yield {"role": "assistant", "content": delta}
+                            yield item
                     except Exception:
                         if emitted:
                             raise
