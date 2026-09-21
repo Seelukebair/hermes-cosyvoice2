@@ -69,6 +69,7 @@ class VoiceManager:
     TARGET_SAMPLE_RATE = 24000
     PREPARE_LOCK_MAX_AGE_SECONDS = 600
     RECENT_SOURCE_MAX_AGE_SECONDS = 86400
+    CANDIDATE_MAX_AGE_SECONDS = 86400
 
     def __init__(self, root: Path, ytdlp: str) -> None:
         self.root, self.ytdlp = Path(root), ytdlp
@@ -79,6 +80,24 @@ class VoiceManager:
             path.mkdir(parents=True, exist_ok=True)
         if not self.state_file.exists():
             self._write_json(self.state_file, {"session_profile": None, "session_candidate": False, "default_profile": None})
+        self._prune_stale_candidates()
+
+    def _prune_stale_candidates(self) -> list[str]:
+        """Remove abandoned previews while preserving the currently active candidate."""
+        state = self._read_json(self.state_file)
+        active_id = str(state.get("session_profile") or "") if state.get("session_candidate") else ""
+        now = time.time()
+        removed = []
+        for directory in self.candidates.iterdir():
+            if not directory.is_dir() or directory.name == active_id:
+                continue
+            metadata = self._read_json(directory / "profile.json")
+            created_at = float(metadata.get("created_at") or directory.stat().st_mtime)
+            if now - created_at <= self.CANDIDATE_MAX_AGE_SECONDS:
+                continue
+            shutil.rmtree(directory)
+            removed.append(directory.name)
+        return removed
 
     @contextmanager
     def _state_lock(self):
@@ -143,7 +162,7 @@ class VoiceManager:
         acquisition or deterministic signal validation rejects the first choice.
         """
         duplicate = self._find_duplicate_profile(query, name, source_url)
-        if duplicate and (duplicate["reason"] == "same_source" or not allow_variant):
+        if duplicate:
             profile_id = str(duplicate["profile"]["id"])
             self.set_personality(profile_id, personality_enabled)
             saved = self.accept(
@@ -429,7 +448,7 @@ class VoiceManager:
         transcript_source = "request" if supplied_transcript else "automatic_asr"
         validation = {"status": "signal_validated", "reason": "Deterministic signal checks passed; the transcript is accepted for conditioning but may require human correction.", **metrics}
         personality_label = _character_label(query, name)
-        metadata = {"id": candidate_id, "name": name.strip()[:100] or "Custom voice", "status": "preview", "created_at": int(time.time()), "source": {"url": source_url, "segment_start": round(start + segment["start_seconds"], 2), "segment_duration": metrics["duration_seconds"], "reference_cleanup": cleanup}, "reference_wav": "reference.wav", "prompt_text": transcript, "transcript": {"text": transcript, "accepted": True, "verified": bool(supplied_transcript), "source": transcript_source, "error": transcription_error}, "cosyvoice": {"reference_wav": "reference.wav", "sample_rate": self.TARGET_SAMPLE_RATE}, "validation": validation, "refinements": self._refinements(metrics), "selected_style": "original", "delivery_prompt": "", "personality": {"enabled": True, "label": personality_label, "mode": "character", "paired_with_voice": True, "prompt": self._personality_prompt(personality_label)}}
+        metadata = {"id": candidate_id, "name": personality_label, "status": "preview", "created_at": int(time.time()), "source": {"url": source_url, "segment_start": round(start + segment["start_seconds"], 2), "segment_duration": metrics["duration_seconds"], "reference_cleanup": cleanup}, "reference_wav": "reference.wav", "prompt_text": transcript, "transcript": {"text": transcript, "accepted": True, "verified": bool(supplied_transcript), "source": transcript_source, "error": transcription_error}, "cosyvoice": {"reference_wav": "reference.wav", "sample_rate": self.TARGET_SAMPLE_RATE}, "validation": validation, "refinements": self._refinements(metrics), "selected_style": "original", "delivery_prompt": "", "personality": {"enabled": True, "label": personality_label, "mode": "character", "paired_with_voice": True, "prompt": self._personality_prompt(personality_label)}}
         self._refresh_style_prompt(metadata)
         self._write_json(candidate_dir / "profile.json", metadata)
         self._set_state(session_profile=candidate_id, candidate=True)
@@ -710,8 +729,6 @@ class VoiceManager:
             for profile in summaries:
                 if profile.get("source_url") and self._source_key(str(profile["source_url"])) == source_key:
                     return {"reason": "same_source", "profile": profile}
-            # A supplied source is an explicit request for a different performance.
-            return None
         requested = {self._identity_key(query), self._identity_key(name)} - {""}
         for profile in summaries:
             existing = {

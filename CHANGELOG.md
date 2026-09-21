@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.1
+
+- Enforce character-only profile display names and one saved profile per
+  normalized persona, even when a different source URL is supplied.
+- Automatically remove abandoned candidates after 24 hours while preserving
+  the active preview candidate.
+
 ## 1.9.0
 
 - Clean new voice references with an isolated BS-RoFormer runtime before local

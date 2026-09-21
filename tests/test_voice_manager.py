@@ -20,6 +20,28 @@ class VoiceManagerTests(unittest.TestCase):
         self.assertEqual(12, VoiceManager.TARGET_SECONDS)
         self.assertEqual(10, VoiceManager.MIN_REFERENCE_SECONDS)
         self.assertEqual(15, VoiceManager.MAX_REFERENCE_SECONDS)
+        self.assertEqual(86400, VoiceManager.CANDIDATE_MAX_AGE_SECONDS)
+
+    def test_stale_candidates_are_pruned_but_active_candidate_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = VoiceManager(root, "/missing/yt-dlp")
+            stale_id = self._candidate(manager)
+            stale = manager.candidates / stale_id / "profile.json"
+            data = manager._read_json(stale)
+            data["created_at"] = int(time.time()) - manager.CANDIDATE_MAX_AGE_SECONDS - 1
+            manager._write_json(stale, data)
+            VoiceManager(root, "/missing/yt-dlp")
+            self.assertFalse(stale.parent.exists())
+
+            active_id = self._candidate(manager)
+            active = manager.candidates / active_id / "profile.json"
+            data = manager._read_json(active)
+            data["created_at"] = int(time.time()) - manager.CANDIDATE_MAX_AGE_SECONDS - 1
+            manager._write_json(active, data)
+            manager._set_state(session_profile=active_id, candidate=True)
+            VoiceManager(root, "/missing/yt-dlp")
+            self.assertTrue(active.parent.exists())
 
     def test_generated_personality_is_paired_character_not_jarvis_blend(self) -> None:
         prompt = VoiceManager._personality_prompt("Optimus Prime")
@@ -206,6 +228,19 @@ class VoiceManagerTests(unittest.TestCase):
             )
             self.assertTrue(result["reused_existing"])
             self.assertEqual("same_source", result["duplicate_reason"])
+
+    def test_supplied_source_cannot_create_duplicate_persona(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = VoiceManager(Path(tmp), "/missing/yt-dlp")
+            profile_id = self._candidate(manager)
+            manager.accept(profile_id, "original", True, False)
+            manager.prepare = lambda *args, **kwargs: self.fail("duplicate persona must be reused")
+            result = manager.create(
+                "Narrator", "Narrator", source_url="https://youtu.be/a-different-source",
+                allow_variant=True,
+            )
+            self.assertTrue(result["reused_existing"])
+            self.assertEqual("same_identity", result["duplicate_reason"])
 
     def test_profile_inventory_exposes_identity_source_and_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

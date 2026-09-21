@@ -16,12 +16,17 @@ session voice and persistent default; do not answer from memory.
    profile `name`, `make_default=true` when requested, and `enabled=true` unless
    personality was declined. Do not ask for source, transcript, rights, preview,
    or save confirmation.
+   The profile name must be only the canonical character or person name, such
+   as `JARVIS`, `Optimus Prime`, or `Samuel L. Jackson`. Store era, movie,
+   intensity, source, and performance details in profile metadata, never in the
+   display name.
    When the user supplies a YouTube URL, pass it as `source_url` to `create` and
    preserve an explicitly requested `start_seconds`; do not replace it with a search.
-   Check `list` first. Reuse a matching saved profile by default. Set
-   `allow_variant=true` only when the user explicitly asks for a different,
-   newer, alternate, replacement, or otherwise distinct performance. Exact
-   source URLs are always deduplicated.
+   Check `list` first. One saved profile is allowed per normalized persona.
+   Always reuse the matching saved profile; a different URL or requested style
+   must not create a duplicate persona. Exact source URLs are also deduplicated.
+   Prepared candidates are temporary and expire after 24 hours unless they are
+   the currently active candidate.
 2. `create` uses the supplied URL or searches ranked unflagged sources, extracts
    a 12-second reference and enforces the 10-15 second reference contract,
    runs deterministic signal checks, accepts the local ASR transcript as
@@ -54,10 +59,10 @@ session voice and persistent default; do not answer from memory.
    Factual accuracy, tool
    discipline, and safety behavior remain unchanged underneath presentation. On `no`, `voice
    only`, or a similar opt-out, call `set_personality` with `enabled=false`.
-   When the user requests a materially different presentation style, keep it in
-   a separate profile and use `set_personality.personality_prompt`; do not alter
-   the shared template or another profile. Profile-specific instructions may
-   explicitly allow theatrical delivery when requested.
+   When the user requests a materially different presentation style, update the
+   existing persona's profile-scoped prompt; do not create another profile for
+   the same character or alter the shared template. Profile-specific
+   instructions may explicitly allow theatrical delivery when requested.
    Do not alter `SOUL.md`; presentation stays profile-scoped.
 5. Read tool errors and present their structured `choices`; do not invent a
    recovery path.
