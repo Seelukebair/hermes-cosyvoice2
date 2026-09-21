@@ -1,0 +1,31 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "Jarvis CosyVoice TTS is already configured."
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the Jarvis CosyVoice bridge.",
+      "invalid_auth": "The Jarvis CosyVoice bridge rejected the token.",
+      "unknown": "Unexpected error."
+    },
+    "step": {
+      "user": {
+        "title": "Connect to Jarvis CosyVoice",
+        "description": "The voice value 'default' is resolved by the Jarvis backend against Hermes's shared persistent CosyVoice profile state at request time.",
+        "data": {
+          "base_url": "Bridge URL",
+          "bearer_token": "Bridge token",
+          "fallback_entity_id": "Fallback TTS entity",
+          "request_timeout": "Request timeout (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "tts": {
+      "jarvis_cosyvoice": {
+        "name": "Jarvis CosyVoice"
+      }
+    }
+  }
+}

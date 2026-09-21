@@ -1,0 +1,11 @@
+Hermes CosyVoice2 Integration
+Copyright 2026 Luke Bair and contributors
+
+This repository contains integration code and does not redistribute model
+weights. The optional runtime downloads and uses CosyVoice and CosyVoice2-0.5B,
+which are maintained by QwenAudio/FunAudioLLM and distributed under their own
+Apache-2.0 notices and model metadata.
+
+External tools used at runtime include FFmpeg, SoX, yt-dlp, PyTorch, Whisper,
+and their dependencies. Their licenses remain with their respective projects.
+

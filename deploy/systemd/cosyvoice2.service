@@ -1,0 +1,27 @@
+[Unit]
+Description=CosyVoice2 local TTS service for Hermes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@PREFIX@/source
+EnvironmentFile=-/etc/default/cosyvoice2
+Environment=PYTHONPATH=@PREFIX@/source:@PREFIX@/source/third_party/Matcha-TTS
+ExecStart=@PREFIX@/venv/bin/python @PREFIX@/app/cosyvoice_server.py --model-dir @PREFIX@/model --prompt-wav @PREFIX@/source/asset/zero_shot_prompt.wav --prompt-text "希望你以后能够做的比我还好呦。" --profile-root @PREFIX@/data/voice_profiles --model-revision @MODEL_REVISION@ --source-revision @SOURCE_REVISION@
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=300
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=@PREFIX@/data/voice_profiles
+RestrictAddressFamilies=AF_INET AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
+

@@ -1,0 +1,39 @@
+[Unit]
+Description=Jarvis CosyVoice bridge for Home Assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=administrator
+Group=administrator
+EnvironmentFile=/etc/jarvis-cosyvoice-ha-proxy.env
+ExecStart=/usr/bin/python3 /usr/local/lib/jarvis-cosyvoice-ha-proxy.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @resources @swap
+RemoveIPC=true
+UMask=0077
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
