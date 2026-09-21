@@ -25,10 +25,13 @@ class BackendServer(ThreadingHTTPServer):
         self.started = threading.Event()
         self.release = threading.Event()
         self.block_requests = False
+        self.block_stream_after_first = False
         self.fail_next = False
         self.active = 0
         self.max_active = 0
         self.payloads: list[dict] = []
+        self.stream_chunks: list[bytes] = []
+        self.first_stream_chunk = threading.Event()
 
 
 class BackendHandler(BaseHTTPRequestHandler):
@@ -68,6 +71,33 @@ class BackendHandler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(length))
         with self.server.lock:
             self.server.payloads.append(payload)
+        if self.path == "/synthesize-stream":
+            self._enter()
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                for index, chunk in enumerate(self.server.stream_chunks):
+                    try:
+                        self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
+                        self.wfile.write(chunk)
+                        self.wfile.write(b"\r\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                        return
+                    if index == 0:
+                        self.server.first_stream_chunk.set()
+                        if self.server.block_stream_after_first:
+                            self.server.release.wait(3)
+                try:
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    return
+            finally:
+                self._leave()
+            return
         data = b'{"mocked":true}'
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -168,6 +198,22 @@ class ProxyTests(unittest.TestCase):
             return response.status, dict(response.headers), json.loads(data) if data else None
         finally:
             connection.close()
+
+    @staticmethod
+    def _stream_request(server, body: dict):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", server.server_port, timeout=4
+        )
+        connection.request(
+            "POST",
+            "/synthesize-stream",
+            body=json.dumps(body).encode(),
+            headers={
+                "Authorization": "Bearer test-token",
+                "Content-Type": "application/json",
+            },
+        )
+        return connection, connection.getresponse()
 
     def test_bearer_auth(self) -> None:
         self.assertTrue(self.proxy._authorized("Bearer test-token"))
@@ -287,6 +333,56 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(503, failed_status)
         self.assertEqual("backend_unavailable", failed_payload["error"])
         self.assertEqual(200, recovered_status)
+
+    def test_stream_is_chunked_without_buffering_and_holds_capacity(self) -> None:
+        backend = self._start_backend()
+        backend.stream_chunks = [
+            b"RIFF\x00\x00\x00\x00WAVEfirst",
+            b"second",
+        ]
+        backend.block_stream_after_first = True
+        server = self._start_proxy()
+        self._profile("profiles", "saved-one")
+        self._state(session_profile=None, session_candidate=False, default_profile="saved-one")
+
+        connection, response = self._stream_request(server, {"text": "test"})
+        self.addCleanup(connection.close)
+        self.assertEqual(200, response.status)
+        self.assertEqual("chunked", response.headers["Transfer-Encoding"])
+        self.assertNotIn("Content-Length", response.headers)
+        self.assertEqual(b"RIFF\x00\x00\x00\x00WAVEfirst", response.read(17))
+        self.assertTrue(backend.first_stream_chunk.wait(1))
+
+        status, headers, payload = self._request(server, "GET", "/health")
+        self.assertEqual(503, status)
+        self.assertEqual("1", headers["Retry-After"])
+        self.assertEqual("proxy_capacity_exceeded", payload["error"])
+
+        backend.release.set()
+        self.assertEqual(b"second", response.read())
+        status, _, _ = self._request(server, "GET", "/health")
+        self.assertEqual(200, status)
+        self.assertEqual("saved-one", backend.payloads[0]["voice"])
+
+    def test_stream_client_disconnect_releases_capacity(self) -> None:
+        backend = self._start_backend()
+        backend.stream_chunks = [b"RIFF\x00\x00\x00\x00WAVEfirst", b"second"]
+        backend.block_stream_after_first = True
+        server = self._start_proxy()
+        self._profile("profiles", "saved-one")
+        self._state(session_profile=None, session_candidate=False, default_profile="saved-one")
+
+        connection, response = self._stream_request(server, {"text": "test"})
+        self.assertEqual(b"RIFF\x00\x00\x00\x00WAVEfirst", response.read(17))
+        connection.close()
+        backend.release.set()
+
+        for _ in range(20):
+            status, _, _ = self._request(server, "GET", "/health")
+            if status == 200:
+                break
+            threading.Event().wait(0.05)
+        self.assertEqual(200, status, "stream slot was not released after disconnect")
 
     def test_server_threads_do_not_block_shutdown(self) -> None:
         self.assertTrue(self.proxy.Server.daemon_threads)

@@ -1,0 +1,10 @@
+{
+  "domain": "hermes_wyoming_agent",
+  "name": "Hermes Wyoming Agent",
+  "version": "1.1.0",
+  "documentation": "https://github.com/Seelukebair/hermes-cosyvoice2/tree/main/integrations/home-assistant",
+  "config_flow": true,
+  "dependencies": ["conversation", "wyoming"],
+  "codeowners": [],
+  "iot_class": "local_push"
+}

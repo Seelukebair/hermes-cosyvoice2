@@ -52,6 +52,24 @@ class VoiceProfileRegistryTests(unittest.TestCase):
         self.registry.consume(prompt)
         self.assertEqual("preview-one", self.registry.resolve("default").profile_id)
 
+    def test_saved_default_warmup_ignores_preview_candidate(self):
+        self.profile("candidates", "preview-one")
+        self.profile("profiles", "saved-one", "saved words")
+        self.state(session_profile="preview-one", session_candidate=True, default_profile="saved-one")
+
+        prompt = self.registry.resolve_saved_default()
+
+        self.assertIsNotNone(prompt)
+        self.assertEqual("saved-one", prompt.profile_id)
+        self.assertFalse(prompt.consume_preview)
+
+    def test_saved_default_prefers_persisted_session_profile(self):
+        self.profile("profiles", "session-one")
+        self.profile("profiles", "saved-one")
+        self.state(session_profile="session-one", session_candidate=False, default_profile="saved-one")
+
+        self.assertEqual("session-one", self.registry.resolve_saved_default().profile_id)
+
     def test_rejects_traversal_and_incomplete_profiles(self):
         with self.assertRaisesRegex(ValueError, "invalid voice profile id"):
             self.registry.resolve("../secret")

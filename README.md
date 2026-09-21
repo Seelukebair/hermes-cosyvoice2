@@ -15,6 +15,12 @@ never stored in Git.
 
 ## Tested pins
 
+The reviewed [voice latency deployment plan](docs/voice-latency-deployment-plan.md)
+records the deployed reference cache, startup hydration, progressive Home
+Assistant streaming, measurements, and rollback. The buffered command endpoint
+remains available for Hermes and compatibility clients. Optional JIT/TensorRT
+acceleration remains a separate test-and-promote experiment.
+
 - CosyVoice source: `074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc`
 - `FunAudioLLM/CosyVoice2-0.5B`: `eec1ae6c79877dbd9379285cf8789c9e0879293d`
 - Python 3.10, PyTorch 2.3.1/CUDA 12.1 wheels
@@ -90,6 +96,11 @@ PYTHONPATH=runtime python -m unittest discover -s runtime/tests -v
 The read-only health check confirms readiness, placement, and both pinned
 revisions. A production acceptance test should additionally synthesize a short
 line through Hermes and decode the resulting WAV.
+
+`GET /health` also reports the bounded conditioning-cache state, persisted-voice
+warm-up result, and content-free metadata for the last synthesis. Progressive
+clients use `POST /synthesize-stream`; the existing `POST /synthesize` contract
+is unchanged.
 
 ## Voice profiles
 

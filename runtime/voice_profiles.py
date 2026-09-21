@@ -53,7 +53,29 @@ class VoiceProfileRegistry:
         if not PROFILE_ID.fullmatch(profile_id):
             raise ValueError("invalid voice profile id")
 
-        for collection in ("candidates", "profiles"):
+        return self._resolve_profile(profile_id, ("candidates", "profiles"), consume_preview)
+
+    def resolve_saved_default(self) -> VoicePrompt | None:
+        """Return the persisted session/default voice without using previews."""
+        state = self._read_json(self.root / "state.json")
+        profile_ids = []
+        if not state.get("session_candidate"):
+            profile_ids.append(state.get("session_profile"))
+        profile_ids.append(state.get("default_profile"))
+        for raw_profile_id in profile_ids:
+            profile_id = str(raw_profile_id or "").strip().lower()
+            if not profile_id or not PROFILE_ID.fullmatch(profile_id):
+                continue
+            try:
+                return self._resolve_profile(profile_id, ("profiles",), False)
+            except ValueError:
+                continue
+        return None
+
+    def _resolve_profile(
+        self, profile_id: str, collections: tuple[str, ...], consume_preview: bool
+    ) -> VoicePrompt:
+        for collection in collections:
             directory = self.root / collection / profile_id
             metadata_path = directory / "profile.json"
             prompt_wav = directory / "reference.wav"

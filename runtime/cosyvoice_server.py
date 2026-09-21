@@ -7,6 +7,7 @@ import argparse
 import io
 import os
 import threading
+import time
 import types
 import wave
 from contextlib import asynccontextmanager, nullcontext
@@ -37,10 +38,13 @@ if PLACEMENT == "cpu":
 import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from cosyvoice.cli.cosyvoice import AutoModel
+from conditioning_cache import ConditioningCache, ConditioningKey, fingerprint_file, hash_text
+from streaming_audio import iter_streaming_wav
+from upstream_guard import install_background_generation_guard
 from voice_profiles import VoiceProfileRegistry
 
 
@@ -49,6 +53,77 @@ class SynthesisRequest(BaseModel):
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     instruct: str = Field(default="", max_length=500)
     voice: str = Field(default="default", max_length=64)
+
+
+def _cache_limit(name: str, default: int) -> int:
+    value = os.environ.get(name, str(default))
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a non-negative integer") from exc
+    if parsed < 0:
+        raise RuntimeError(f"{name} must be a non-negative integer")
+    return parsed
+
+
+def _enabled(name: str, default: bool) -> bool:
+    value = os.environ.get(name, "true" if default else "false").strip().lower()
+    if value not in {"true", "false", "1", "0", "yes", "no"}:
+        raise RuntimeError(f"{name} must be a boolean")
+    return value in {"true", "1", "yes"}
+
+
+def _conditioning_key(args: argparse.Namespace, prompt, mode: str, conditioning_text: str) -> ConditioningKey:
+    return ConditioningKey(
+        source_revision=args.source_revision,
+        model_revision=args.model_revision,
+        profile_id=prompt.profile_id,
+        reference_fingerprint=fingerprint_file(prompt.prompt_wav),
+        mode=mode,
+        conditioning_text_hash=hash_text(conditioning_text),
+    )
+
+
+def _cpu_conditioning(value):
+    """Keep cached reference tensors out of scarce production VRAM."""
+    if isinstance(value, dict):
+        return {key: _cpu_conditioning(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_cpu_conditioning(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_cpu_conditioning(item) for item in value)
+    detach = getattr(value, "detach", None)
+    cpu = getattr(value, "cpu", None)
+    if callable(detach) and callable(cpu):
+        return detach().cpu()
+    return value
+
+
+def _conditioned_chunks(
+    model, text: str, conditioning: dict, speed: float, *, stream: bool = False
+):
+    """Rebuild request text while reusing only reference-derived frontend inputs."""
+    for segment in model.frontend.text_normalize(text, split=True, text_frontend=True):
+        request_input = dict(conditioning)
+        text_tokens, text_token_lengths = model.frontend._extract_text_token(segment)
+        request_input["text"] = text_tokens
+        request_input["text_len"] = text_token_lengths
+        if stream:
+            # Upstream grows this mutable value while streaming and does not
+            # reset it for the next request. Keep first-audio behavior stable.
+            model.model.token_hop_len = 25
+        try:
+            yield from model.model.tts(
+                **request_input,
+                stream=stream,
+                speed=1.0 if stream else speed,
+            )
+        finally:
+            if stream:
+                model.model.token_hop_len = 25
+            guard = getattr(model.model, "_jarvis_generation_guard", None)
+            if guard is not None:
+                guard.pop_and_raise()
 
 
 def load_model(model_dir: Path):
@@ -135,10 +210,11 @@ def load_model(model_dir: Path):
             )
         return original_hift_inference(*args, **kwargs)
 
+    runtime.device = llm_device
     runtime.llm_job = types.MethodType(llm_job, runtime)
+    install_background_generation_guard(runtime)
     runtime.token2wav = types.MethodType(token2wav, runtime)
     runtime.hift.inference = hift_inference
-    runtime.device = llm_device
     return model, {
         "llm": str(llm_device),
         "flow": str(flow_device),
@@ -163,18 +239,76 @@ def wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
 
 def create_app(args: argparse.Namespace) -> FastAPI:
     lock = threading.Lock()
-    state: dict[str, object] = {"ready": False}
+    metrics_lock = threading.Lock()
+    state: dict[str, object] = {
+        "ready": False,
+        "conditioning_cache": ConditioningCache(
+            max_entries=_cache_limit("COSYVOICE_CONDITIONING_CACHE_ENTRIES", 8),
+            max_bytes=_cache_limit("COSYVOICE_CONDITIONING_CACHE_MAX_BYTES", 256 * 1024 * 1024),
+        ),
+        "last_synthesis": None,
+    }
+
+    def record_last_synthesis(metadata: dict[str, object]) -> None:
+        # This endpoint is intentionally safe to expose on the LAN: never keep
+        # request text, instruction text, paths, hashes, or exception details.
+        with metrics_lock:
+            state["last_synthesis"] = metadata
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         model, component_devices = load_model(args.model_dir)
-        # Current CosyVoice frontend methods load and resample the prompt path.
+        profiles = VoiceProfileRegistry(args.profile_root, args.prompt_wav, args.prompt_text)
         state.update(
             model=model,
-            profiles=VoiceProfileRegistry(args.profile_root, args.prompt_wav, args.prompt_text),
+            profiles=profiles,
             component_devices=component_devices,
-            ready=True,
         )
+        warmup = {"enabled": _enabled("COSYVOICE_WARMUP_ENABLED", True), "status": "disabled"}
+        if warmup["enabled"]:
+            warmup_started_at = time.monotonic()
+            prompt = profiles.resolve_saved_default()
+            if prompt is None:
+                warmup["status"] = "skipped_no_saved_profile"
+            else:
+                try:
+                    instruct = prompt.instruct
+                    mode = "instruct2" if instruct else "zero_shot"
+                    conditioning_text = (
+                        instruct
+                        if instruct
+                        else model.frontend.text_normalize(
+                            prompt.prompt_text, split=False, text_frontend=True
+                        )
+                    )
+                    cache_key = _conditioning_key(args, prompt, mode, conditioning_text)
+
+                    def build_conditioning() -> dict:
+                        if mode == "instruct2":
+                            model_input = model.frontend.frontend_instruct2(
+                                "", conditioning_text, str(prompt.prompt_wav), model.sample_rate, ""
+                            )
+                        else:
+                            model_input = model.frontend.frontend_zero_shot(
+                                "", conditioning_text, str(prompt.prompt_wav), model.sample_rate, ""
+                            )
+                        model_input.pop("text", None)
+                        model_input.pop("text_len", None)
+                        return _cpu_conditioning(model_input)
+
+                    cached = state["conditioning_cache"].get_or_create(cache_key, build_conditioning)
+                    with torch.inference_mode():
+                        for _chunk in _conditioned_chunks(
+                            model, "Ready.", cached.value, 1.0, stream=False
+                        ):
+                            pass
+                    warmup.update(status="ok", profile_id=prompt.profile_id, mode=mode)
+                except Exception:
+                    # Startup remains available for explicit requests; health
+                    # reports the failed warm-up without exposing private data.
+                    warmup.update(status="error", profile_id=prompt.profile_id)
+            warmup["elapsed_ms"] = round((time.monotonic() - warmup_started_at) * 1000, 2)
+        state.update(warmup=warmup, ready=True)
         yield
         state["ready"] = False
 
@@ -182,6 +316,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, object]:
+        with metrics_lock:
+            last_synthesis = state["last_synthesis"]
         return {
             "ready": state["ready"],
             "backend": "cosyvoice2",
@@ -189,10 +325,14 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             "component_devices": state.get("component_devices", {}),
             "model_revision": args.model_revision,
             "source_revision": args.source_revision,
+            "conditioning_cache": state["conditioning_cache"].snapshot(),
+            "warmup": state.get("warmup", {}),
+            "last_synthesis": last_synthesis,
         }
 
     @app.post("/synthesize")
     def synthesize(request: SynthesisRequest) -> Response:
+        started_at = time.monotonic()
         if not state["ready"]:
             raise HTTPException(status_code=503, detail="model is not ready")
         text = request.text.strip()
@@ -203,29 +343,204 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             prompt = state["profiles"].resolve(request.voice)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        queue_started_at = time.monotonic()
         with lock, torch.inference_mode():
+            queue_wait_ms = round((time.monotonic() - queue_started_at) * 1000, 2)
             instruct = request.instruct.strip() or prompt.instruct
-            if instruct:
-                chunks = model.inference_instruct2(
-                    text,
-                    instruct,
-                    str(prompt.prompt_wav),
-                    stream=False,
-                    speed=request.speed,
+            mode = "instruct2" if instruct else "zero_shot"
+            # Upstream normalizes the zero-shot transcript before extracting
+            # prompt tokens. Instruct2 uses its effective instruction directly.
+            conditioning_text = (
+                instruct
+                if instruct
+                else model.frontend.text_normalize(prompt.prompt_text, split=False, text_frontend=True)
+            )
+            cache_started_at = time.monotonic()
+            cache_key = _conditioning_key(args, prompt, mode, conditioning_text)
+
+            def build_conditioning() -> dict:
+                if mode == "instruct2":
+                    model_input = model.frontend.frontend_instruct2(
+                        "", conditioning_text, str(prompt.prompt_wav), model.sample_rate, ""
+                    )
+                else:
+                    model_input = model.frontend.frontend_zero_shot(
+                        "", conditioning_text, str(prompt.prompt_wav), model.sample_rate, ""
+                    )
+                model_input.pop("text", None)
+                model_input.pop("text_len", None)
+                return _cpu_conditioning(model_input)
+
+            try:
+                cached = state["conditioning_cache"].get_or_create(cache_key, build_conditioning)
+            except Exception:
+                record_last_synthesis(
+                    {
+                        "outcome": "error",
+                        "phase": "conditioning",
+                        "profile_id": prompt.profile_id,
+                        "mode": mode,
+                        "queue_wait_ms": queue_wait_ms,
+                        "total_ms": round((time.monotonic() - started_at) * 1000, 2),
+                    }
                 )
-            else:
-                chunks = model.inference_zero_shot(
-                    text,
-                    prompt.prompt_text,
-                    str(prompt.prompt_wav),
-                    stream=False,
-                    speed=request.speed,
+                raise
+            cache_lookup_ms = round((time.monotonic() - cache_started_at) * 1000, 2)
+            synthesis_started_at = time.monotonic()
+            try:
+                audio = [
+                    chunk["tts_speech"].detach().cpu().float().numpy().reshape(-1)
+                    for chunk in _conditioned_chunks(model, text, cached.value, request.speed)
+                ]
+            except Exception:
+                record_last_synthesis(
+                    {
+                        "outcome": "error",
+                        "profile_id": prompt.profile_id,
+                        "mode": mode,
+                        "cache_hit": cached.hit,
+                        "queue_wait_ms": queue_wait_ms,
+                        "cache_lookup_ms": cache_lookup_ms,
+                        "total_ms": round((time.monotonic() - started_at) * 1000, 2),
+                    }
                 )
-            audio = [chunk["tts_speech"].detach().cpu().float().numpy().reshape(-1) for chunk in chunks]
+                raise
         if not audio:
+            record_last_synthesis(
+                {
+                    "outcome": "empty_audio",
+                    "profile_id": prompt.profile_id,
+                    "mode": mode,
+                    "cache_hit": cached.hit,
+                    "queue_wait_ms": queue_wait_ms,
+                    "cache_lookup_ms": cache_lookup_ms,
+                    "total_ms": round((time.monotonic() - started_at) * 1000, 2),
+                }
+            )
             raise HTTPException(status_code=500, detail="model produced no audio")
         state["profiles"].consume(prompt)
-        return Response(wav_bytes(np.concatenate(audio), model.sample_rate), media_type="audio/wav")
+        combined = np.concatenate(audio)
+        record_last_synthesis(
+            {
+                "outcome": "ok",
+                "profile_id": prompt.profile_id,
+                "mode": mode,
+                "cache_hit": cached.hit,
+                "queue_wait_ms": queue_wait_ms,
+                "cache_lookup_ms": cache_lookup_ms,
+                "synthesis_ms": round((time.monotonic() - synthesis_started_at) * 1000, 2),
+                "total_ms": round((time.monotonic() - started_at) * 1000, 2),
+                "audio_duration_ms": round((combined.size / model.sample_rate) * 1000, 2),
+            }
+        )
+        return Response(wav_bytes(combined, model.sample_rate), media_type="audio/wav")
+
+    @app.post("/synthesize-stream")
+    def synthesize_stream(request: SynthesisRequest) -> StreamingResponse:
+        """Stream one continuous WAV while retaining the buffered API."""
+        started_at = time.monotonic()
+        if not state["ready"]:
+            raise HTTPException(status_code=503, detail="model is not ready")
+        text = request.text.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="text is empty")
+        model = state["model"]
+        try:
+            prompt = state["profiles"].resolve(request.voice)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        def model_audio():
+            queue_started_at = time.monotonic()
+            completed = False
+            with lock, torch.inference_mode():
+                queue_wait_ms = round((time.monotonic() - queue_started_at) * 1000, 2)
+                instruct = request.instruct.strip() or prompt.instruct
+                mode = "instruct2" if instruct else "zero_shot"
+                conditioning_text = (
+                    instruct
+                    if instruct
+                    else model.frontend.text_normalize(
+                        prompt.prompt_text, split=False, text_frontend=True
+                    )
+                )
+                cache_started_at = time.monotonic()
+                cache_key = _conditioning_key(args, prompt, mode, conditioning_text)
+
+                def build_conditioning() -> dict:
+                    if mode == "instruct2":
+                        model_input = model.frontend.frontend_instruct2(
+                            "",
+                            conditioning_text,
+                            str(prompt.prompt_wav),
+                            model.sample_rate,
+                            "",
+                        )
+                    else:
+                        model_input = model.frontend.frontend_zero_shot(
+                            "",
+                            conditioning_text,
+                            str(prompt.prompt_wav),
+                            model.sample_rate,
+                            "",
+                        )
+                    model_input.pop("text", None)
+                    model_input.pop("text_len", None)
+                    return _cpu_conditioning(model_input)
+
+                cached = state["conditioning_cache"].get_or_create(
+                    cache_key, build_conditioning
+                )
+                cache_lookup_ms = round((time.monotonic() - cache_started_at) * 1000, 2)
+                synthesis_started_at = time.monotonic()
+                audio_samples = 0
+                first_audio_ms = None
+                try:
+                    for chunk in _conditioned_chunks(
+                        model, text, cached.value, request.speed, stream=True
+                    ):
+                        audio = chunk["tts_speech"].detach().cpu().float().numpy().reshape(-1)
+                        if first_audio_ms is None:
+                            first_audio_ms = round(
+                                (time.monotonic() - started_at) * 1000, 2
+                            )
+                        audio_samples += audio.size
+                        yield audio
+                    completed = True
+                finally:
+                    outcome = "ok" if completed else "cancelled_or_error"
+                    record_last_synthesis(
+                        {
+                            "outcome": outcome,
+                            "profile_id": prompt.profile_id,
+                            "mode": mode,
+                            "streaming": True,
+                            "cache_hit": cached.hit,
+                            "queue_wait_ms": queue_wait_ms,
+                            "cache_lookup_ms": cache_lookup_ms,
+                            "first_audio_ms": first_audio_ms,
+                            "synthesis_ms": round(
+                                (time.monotonic() - synthesis_started_at) * 1000, 2
+                            ),
+                            "total_ms": round(
+                                (time.monotonic() - started_at) * 1000, 2
+                            ),
+                            "audio_duration_ms": round(
+                                (audio_samples / model.sample_rate) * 1000, 2
+                            ),
+                        }
+                    )
+            if completed:
+                state["profiles"].consume(prompt)
+
+        return StreamingResponse(
+            iter_streaming_wav(model_audio(), model.sample_rate, request.speed),
+            media_type="audio/wav",
+            headers={
+                "Cache-Control": "no-store",
+                "X-CosyVoice-Stream": "pcm16",
+            },
+        )
 
     return app
 

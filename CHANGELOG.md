@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.10.0
+
+- Add bounded CPU reference-conditioning caching and persisted-profile startup
+  hydration while explicitly excluding one-shot preview candidates.
+- Add progressive PCM/WAV synthesis with continuous pitch-preserving 1.10x
+  tempo conversion, bounded disconnect draining, and background-thread failure
+  recovery without modifying pinned CosyVoice source.
+- Stream authenticated audio through the Home Assistant bridge and implement
+  Home Assistant's native streaming TTS interface with pre-audio Kokoro fallback.
+- Package the companion Hermes Assist conversation integration, publish final
+  answers through HA's supported chat-log delta API, and move Node-RED auth to a
+  named Home Assistant secret.
+- Add content-free health timing/cache metrics and a reproducible latency
+  benchmark utility.
+
 ## 1.9.3
 
 - Store operator-created runtime and provider-registration rollbacks beneath the

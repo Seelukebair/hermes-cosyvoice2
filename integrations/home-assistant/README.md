@@ -1,11 +1,14 @@
 # Jarvis CosyVoice TTS for Home Assistant
 
-This repository contains two isolated, update-safe pieces:
+This repository contains three isolated, update-safe pieces:
 
 - `custom_components/jarvis_cosyvoice_tts`: a Home Assistant config-entry TTS provider.
+- `custom_components/hermes_wyoming_agent`: the companion Assist conversation
+  entity that forwards to Hermes and publishes the final answer through HA's
+  supported chat-log delta API.
 - `jarvis-cosyvoice-ha-proxy.py` plus its systemd unit: an authenticated, HA-only bridge from `192.168.1.10:17871` to Jarvis's loopback CosyVoice API at `127.0.0.1:17870`.
 
-The Home Assistant provider accepts no caller-selected voice. At request time, the bridge reads the same `/srv/cosyvoice2/data/voice_profiles/state.json` state used by Hermes, ignores every unaccepted `session_candidate`, verifies that the accepted session/default profile is saved and transcript-verified under `profiles/`, and forwards that profile ID explicitly. This prevents the backend's `voice: default` preview selector from leaking a one-shot candidate into Home Assistant. No profile ID is copied into Home Assistant. If no accepted saved session/default profile exists, the bridge returns `503 voice_profile_unavailable` instead of silently using the backend's built-in reference voice. If CosyVoice is unavailable or rejects a request, the provider calls the existing `tts.kokoro` Home Assistant engine without initiating media playback.
+The Home Assistant provider accepts no caller-selected voice. At request time, the bridge reads the same `/srv/cosyvoice2/data/voice_profiles/state.json` state used by Hermes, ignores every unaccepted `session_candidate`, verifies that the accepted session/default profile is saved with an accepted transcript under `profiles/`, and forwards that profile ID explicitly. This prevents the backend's `voice: default` preview selector from leaking a one-shot candidate into Home Assistant. No profile ID is copied into Home Assistant. If no accepted saved session/default profile exists, the bridge returns `503 voice_profile_unavailable` instead of silently using the backend's built-in reference voice. If CosyVoice is unavailable or rejects a request, the provider calls the existing `tts.kokoro` Home Assistant engine without initiating media playback.
 
 ## Safety properties
 
@@ -14,12 +17,19 @@ The Home Assistant provider accepts no caller-selected voice. At request time, t
 - The bridge accepts only `192.168.1.11` and loopback clients and requires a dedicated bearer token.
 - The bridge never logs authorization headers, payloads, or spoken text.
 - The config flow validates `/proxy-health`; it does not synthesize audio.
-- Backend-bound `/health` and `/synthesize` work is limited to two concurrent requests by default. Saturation fails immediately with `503 proxy_capacity_exceeded` and `Retry-After: 1`; `JARVIS_COSYVOICE_MAX_CONCURRENT_REQUESTS` can set another positive limit at startup.
+- Backend-bound `/health`, `/synthesize`, and `/synthesize-stream` work is limited to two concurrent requests by default. Saturation fails immediately with `503 proxy_capacity_exceeded` and `Retry-After: 1`; `JARVIS_COSYVOICE_MAX_CONCURRENT_REQUESTS` can set another positive limit at startup. A stream holds its slot until the backend completes or the client disconnects.
 - Kokoro remains a separate Home Assistant/Wyoming provider and is used only as request-time fallback.
+- Long final answers use HA's native `async_stream_tts_audio` path. Short answers
+  may remain buffered under HA's own streaming threshold. Fallback may occur
+  only before audio starts; a mid-stream failure ends the utterance rather than
+  replaying it in a different voice.
+- Node-RED credentials are loaded by name from `/config/secrets.yaml`; no inline
+  credential or spoken text is written to source or latency logs.
 
 ## Installed paths
 
 - HAOS: `/config/custom_components/jarvis_cosyvoice_tts/`
+- HAOS: `/config/custom_components/hermes_wyoming_agent/`
 - Jarvis1: `/usr/local/lib/jarvis-cosyvoice-ha-proxy.py`
 - Jarvis1: `/etc/systemd/system/jarvis-cosyvoice-ha-proxy.service`
 - Jarvis1: `/etc/jarvis-cosyvoice-ha-proxy.env` (mode 0600)

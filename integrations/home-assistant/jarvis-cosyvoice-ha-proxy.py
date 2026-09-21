@@ -27,6 +27,8 @@ PROFILE_STATE = Path(
 )
 MAX_BODY = 65536
 BACKEND_TIMEOUT = 330
+STREAM_READ_SIZE = 16 * 1024
+MAX_ERROR_BODY = 4096
 PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
@@ -116,7 +118,8 @@ class Server(ThreadingHTTPServer):
 class Handler(BaseHTTPRequestHandler):
     """Forward only the bounded CosyVoice endpoints."""
 
-    server_version = "JarvisCosyVoiceBridge/1.0"
+    server_version = "JarvisCosyVoiceBridge/1.1"
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:
         # Never log headers, request bodies, spoken text, or credentials.
@@ -156,7 +159,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if not self._authenticate():
             return
-        if self.path != "/synthesize":
+        if self.path not in {"/synthesize", "/synthesize-stream"}:
             self.send_error(404)
             return
         try:
@@ -189,11 +192,11 @@ class Handler(BaseHTTPRequestHandler):
         # Resolve the shared selector here and forward the saved id explicitly.
         # This prevents the backend's one-shot preview selector from affecting HA.
         payload["voice"] = profile_id
-        self._forward(
-            "POST",
-            "/synthesize",
-            json.dumps(payload, separators=(",", ":")).encode(),
-        )
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        if self.path == "/synthesize-stream":
+            self._forward_stream("POST", "/synthesize-stream", body)
+            return
+        self._forward("POST", "/synthesize", body)
 
     def _forward(self, method: str, path: str, body: bytes | None) -> None:
         if not self.server.proxy_slots.acquire(blocking=False):
@@ -228,7 +231,102 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if connection is not None:
                 connection.close()
+            self.close_connection = True
             self.server.proxy_slots.release()
+
+    def _forward_stream(self, method: str, path: str, body: bytes) -> None:
+        """Pass a backend audio stream through without response buffering.
+
+        ``http.client`` de-chunks an upstream HTTP/1.1 response as it is read.
+        Re-chunking the decoded bytes is therefore required for the client-facing
+        HTTP/1.1 response. The bounded slot remains held until the reader or
+        writer ends, which keeps slow clients from creating unbounded work.
+        """
+        if not self.server.proxy_slots.acquire(blocking=False):
+            self._json(
+                503,
+                {
+                    "error": "proxy_capacity_exceeded",
+                    "detail": "Concurrent proxy request limit reached",
+                },
+                {"Retry-After": "1"},
+            )
+            return
+
+        target = urlsplit(BACKEND_URL)
+        connection = None
+        stream_started = False
+        try:
+            connection = http.client.HTTPConnection(
+                target.hostname, target.port or 80, timeout=BACKEND_TIMEOUT
+            )
+            connection.request(
+                method,
+                path,
+                body=body,
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            if response.status != 200:
+                self._forward_stream_error(response)
+                return
+
+            self.send_response(200)
+            self.send_header(
+                "Content-Type", response.getheader("Content-Type", "audio/wav")
+            )
+            # The stream may end early. HTTP chunk framing makes that explicit
+            # without promising a final byte count that the backend has not made.
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            stream_started = True
+
+            # ``read1`` returns as soon as the upstream socket has a chunk. A
+            # normal ``read(size)`` may wait to fill its requested buffer and
+            # would quietly turn a small first PCM chunk into buffered output.
+            while data := response.read1(STREAM_READ_SIZE):
+                try:
+                    self.wfile.write(f"{len(data):X}\r\n".encode("ascii"))
+                    self.wfile.write(data)
+                    self.wfile.write(b"\r\n")
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    # Closing the upstream connection in finally stops reading
+                    # as soon as the backend notices the cancelled request.
+                    self.close_connection = True
+                    return
+            try:
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+                return
+        except (OSError, TimeoutError, http.client.HTTPException) as err:
+            # Do not attempt a JSON response once successful stream headers were
+            # written: that would corrupt audio already handed to Home Assistant.
+            if not stream_started:
+                self._json(503, {"error": "backend_unavailable", "detail": type(err).__name__})
+        finally:
+            if connection is not None:
+                connection.close()
+            self.close_connection = True
+            self.server.proxy_slots.release()
+
+    def _forward_stream_error(self, response: http.client.HTTPResponse) -> None:
+        """Return a bounded upstream error before any audio bytes are emitted."""
+        response.read(MAX_ERROR_BODY + 1)
+        data = json.dumps(
+            {
+                "error": "backend_rejected_request",
+                "detail": f"HTTP_{response.status}",
+            },
+            separators=(",", ":"),
+        ).encode()
+        self.send_response(response.status)
+        self.send_header("Content-Type", response.getheader("Content-Type", "application/json"))
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _json(
         self, status: int, payload: dict, extra_headers: dict[str, str] | None = None

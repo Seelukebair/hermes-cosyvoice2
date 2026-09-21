@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from aiohttp import ClientError, ClientTimeout
@@ -10,6 +12,8 @@ from aiohttp import ClientError, ClientTimeout
 from homeassistant.components.tts import (
     ATTR_VOICE,
     DATA_TTS_MANAGER,
+    TTSAudioRequest,
+    TTSAudioResponse,
     TextToSpeechEntity,
     TtsAudioType,
     Voice,
@@ -31,6 +35,10 @@ from .const import (
     DOMAIN,
     OPTION_INSTRUCT,
     OPTION_SPEED,
+    MAX_STREAM_MESSAGE_BYTES,
+    MAX_STREAM_REQUEST_BYTES,
+    STREAM_ENDPOINT,
+    STREAM_READ_SIZE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -88,18 +96,42 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
             )
             return await self._async_get_fallback_audio(message)
 
+    async def async_stream_tts_audio(
+        self, request: TTSAudioRequest
+    ) -> TTSAudioResponse:
+        """Return the bridge's progressive WAV response to Home Assistant.
+
+        The current conversation adapter delivers a completed reply as one text
+        item. Collecting that one item here still lets the client play while
+        CosyVoice generates, and avoids synthesizing arbitrary LLM token pieces.
+        """
+        message = await self._async_collect_stream_message(request.message_gen)
+        payload = self._payload(message, request.options)
+        if (
+            len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+            > MAX_STREAM_REQUEST_BYTES
+        ):
+            raise HomeAssistantError("TTS stream request exceeds the bridge limit")
+        try:
+            return await self._async_open_cosyvoice_stream(payload)
+        except (ClientError, TimeoutError, HomeAssistantError, ValueError) as err:
+            _LOGGER.warning(
+                "Jarvis CosyVoice stream unavailable before audio; trying fallback entity %s: %s",
+                self._fallback_entity_id,
+                err,
+            )
+            extension, audio = await self._async_get_fallback_audio(message)
+
+            async def fallback_data_gen() -> AsyncGenerator[bytes]:
+                yield audio
+
+            return TTSAudioResponse(extension, fallback_data_gen())
+
     async def _async_get_cosyvoice_audio(
         self, message: str, options: dict[str, Any]
     ) -> TtsAudioType:
         """Request WAV audio from the authenticated Jarvis bridge."""
-        payload = {
-            "text": message,
-            # Never pin a Home Assistant request to a profile id. The Jarvis
-            # bridge resolves this shared selector from current profile state.
-            "voice": DEFAULT_VOICE,
-            "speed": float(options.get(OPTION_SPEED, 1.0)),
-            "instruct": str(options.get(OPTION_INSTRUCT, "")),
-        }
+        payload = self._payload(message, options)
         session = async_get_clientsession(self.hass)
         async with session.post(
             self._base_url + "/synthesize",
@@ -116,6 +148,89 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
         if len(audio) < 44 or not audio.startswith(b"RIFF") or audio[8:12] != b"WAVE":
             raise HomeAssistantError("CosyVoice bridge returned invalid WAV audio")
         return "wav", audio
+
+    def _payload(self, message: str, options: dict[str, Any]) -> dict[str, Any]:
+        """Build the request shape shared by buffered and streaming calls."""
+        return {
+            "text": message,
+            # Never pin a Home Assistant request to a profile id. The Jarvis
+            # bridge resolves this shared selector from current profile state.
+            "voice": DEFAULT_VOICE,
+            "speed": float(options.get(OPTION_SPEED, 1.0)),
+            "instruct": str(options.get(OPTION_INSTRUCT, "")),
+        }
+
+    async def _async_collect_stream_message(
+        self, message_gen: AsyncGenerator[str]
+    ) -> str:
+        """Bound a completed HA assistant response before requesting speech."""
+        chunks: list[str] = []
+        byte_count = 0
+        async for chunk in message_gen:
+            if not isinstance(chunk, str):
+                raise HomeAssistantError("TTS stream input must contain text")
+            byte_count += len(chunk.encode("utf-8"))
+            if byte_count > MAX_STREAM_MESSAGE_BYTES:
+                raise HomeAssistantError("TTS stream input exceeds the bridge limit")
+            chunks.append(chunk)
+        message = "".join(chunks).strip()
+        if not message:
+            raise HomeAssistantError("TTS stream input is empty")
+        return message
+
+    async def _async_open_cosyvoice_stream(
+        self, payload: dict[str, Any]
+    ) -> TTSAudioResponse:
+        """Open and validate the first WAV bytes before exposing audio to HA."""
+        session = async_get_clientsession(self.hass)
+        request_context = session.post(
+            self._base_url + STREAM_ENDPOINT,
+            json=payload,
+            headers={"Authorization": f"Bearer {self._token}"},
+            timeout=ClientTimeout(total=self._request_timeout),
+        )
+        response = await request_context.__aenter__()
+        try:
+            if response.status != 200:
+                detail = (await response.text())[:240]
+                raise HomeAssistantError(
+                    f"CosyVoice bridge returned HTTP {response.status}: {detail}"
+                )
+            # The native Wyoming provider sends a 44-byte PCM WAV header with
+            # nframes=0, followed by PCM. Validate it before HA commits to the
+            # stream so a fallback can still be returned safely.
+            header = await response.content.readexactly(44)
+            if not (
+                header.startswith(b"RIFF")
+                and header[8:12] == b"WAVE"
+                and header[12:16] == b"fmt "
+                and header[36:40] == b"data"
+                and header[40:44] == b"\x00\x00\x00\x00"
+            ):
+                raise HomeAssistantError(
+                    "CosyVoice bridge returned invalid streaming WAV audio"
+                )
+        except BaseException:
+            response.close()
+            await request_context.__aexit__(None, None, None)
+            raise
+
+        async def data_gen() -> AsyncGenerator[bytes]:
+            try:
+                yield header
+                async for chunk in response.content.iter_chunked(STREAM_READ_SIZE):
+                    if chunk:
+                        yield chunk
+            except (ClientError, TimeoutError, HomeAssistantError, ValueError) as err:
+                # Audio already reached HA. A fallback would switch voices partway
+                # through an utterance, so close this stream and report the fault.
+                _LOGGER.warning("Jarvis CosyVoice stream ended after audio: %s", err)
+                return
+            finally:
+                response.close()
+                await request_context.__aexit__(None, None, None)
+
+        return TTSAudioResponse("wav", data_gen())
 
     async def _async_get_fallback_audio(self, message: str) -> TtsAudioType:
         """Call the existing Home Assistant TTS entity without media playback."""
