@@ -26,6 +26,12 @@ _SAVED_PROFILE_SWITCH_RE = re.compile(
     r"\b(?:voice|persona)\b",
     re.IGNORECASE | re.DOTALL,
 )
+_BARE_SAVED_PROFILE_SWITCH_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:switch|swap|change|set|use|activate|select)"
+    r"(?:\s+(?:me|us|yourself))?\s+to\s+(?:the\s+)?"
+    r"(?P<target>[a-z0-9][a-z0-9 ._'\u2019-]{0,80}?)\s*[.!?]?\s*$",
+    re.IGNORECASE,
+)
 _HEAR_SAVED_PROFILE_RE = re.compile(
     r"\b(?:i\s+)?(?:want|would\s+like|wanna)\s+to\s+hear\s+"
     r"(?P<target>[a-z0-9][a-z0-9 ._'\u2019-]{1,80}?)(?:[.!?]|$)",
@@ -160,9 +166,16 @@ def _voice_intent_context(
     switch_result: dict[str, Any] | None = None
     switch_error: dict[str, Any] | None = None
     switch_match = _SAVED_PROFILE_SWITCH_RE.search(message)
+    bare_switch_match = _BARE_SAVED_PROFILE_SWITCH_RE.fullmatch(message)
     hear_match = _HEAR_SAVED_PROFILE_RE.search(message)
     switch_reference = (
-        hear_match.group("target").strip() if hear_match else message if switch_match else ""
+        hear_match.group("target").strip()
+        if hear_match
+        else bare_switch_match.group("target").strip()
+        if bare_switch_match
+        else message
+        if switch_match
+        else ""
     )
     if switch_reference and not _CREATE_VOICE_RE.search(message):
         try:

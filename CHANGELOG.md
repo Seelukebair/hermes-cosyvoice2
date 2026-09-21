@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.11.4
+
+- Resolve concise saved-profile requests such as `Switch to Jarvis` before
+  generation, without requiring the words voice, persona, or profile.
+- Leave unrelated commands such as `Switch to dark mode` untouched unless the
+  target resolves uniquely to a saved voice profile.
+
 ## 1.11.3
 
 - Recognize natural saved-profile switch requests including plural voice and

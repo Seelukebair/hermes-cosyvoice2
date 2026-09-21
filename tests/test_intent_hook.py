@@ -154,6 +154,49 @@ class IntentHookTests(unittest.TestCase):
                 manager.status()["state"]["default_profile"],
             )
 
+    def test_bare_switch_to_saved_profile_resolves_without_voice_keyword(self) -> None:
+        plugin = _load_plugin()
+        manager = plugin._manager()
+        profile_id = "classic-movie-jarvis-903deb4e"
+        profile = manager.profiles / profile_id
+        profile.mkdir(parents=True)
+        (profile / "reference.wav").write_bytes(b"RIFF")
+        manager._write_json(
+            profile / "profile.json",
+            {
+                "id": profile_id,
+                "name": "JARVIS",
+                "prompt_text": "Reference words.",
+                "transcript": {"accepted": True},
+                "personality": {
+                    "enabled": True,
+                    "label": "JARVIS",
+                    "paired_with_voice": True,
+                    "prompt": "Use composed JARVIS mannerisms.",
+                },
+            },
+        )
+
+        result = plugin._voice_intent_context(
+            user_message="Switch to Jarvis.",
+            turn_id="bare-jarvis-switch",
+        )
+
+        self.assertIn("completed deterministically", result["context"])
+        self.assertEqual(
+            profile_id,
+            manager.status()["selection"]["selected_profile_id"],
+        )
+
+    def test_bare_switch_to_unknown_target_is_not_claimed_as_voice_intent(self) -> None:
+        plugin = _load_plugin()
+        self.assertIsNone(
+            plugin._voice_intent_context(
+                user_message="Switch to dark mode.",
+                turn_id="unrelated-switch",
+            )
+        )
+
     def test_generic_want_to_hear_request_does_not_route_to_voice_profiles(self) -> None:
         plugin = _load_plugin()
         self.assertIsNone(
