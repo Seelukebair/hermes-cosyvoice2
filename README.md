@@ -18,8 +18,9 @@ never stored in Git.
 The reviewed [voice latency deployment plan](docs/voice-latency-deployment-plan.md)
 records the deployed reference cache, startup hydration, progressive Home
 Assistant streaming, measurements, and rollback. The buffered command endpoint
-remains available for Hermes and compatibility clients. Optional JIT/TensorRT
-acceleration remains a separate test-and-promote experiment.
+remains available for Hermes and compatibility clients. The RTX 3090 reference
+deployment uses a tested FP16 TensorRT flow-decoder engine. JIT remains a
+separate test-and-promote experiment.
 
 - CosyVoice source: `074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc`
 - `FunAudioLLM/CosyVoice2-0.5B`: `eec1ae6c79877dbd9379285cf8789c9e0879293d`
@@ -88,10 +89,19 @@ commit when upgrading. See the current [Hermes plugin documentation](https://git
 ```bash
 python scripts/check_runtime.py \
   --expect-source 074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc \
-  --expect-model eec1ae6c79877dbd9379285cf8789c9e0879293d
+  --expect-model eec1ae6c79877dbd9379285cf8789c9e0879293d \
+  --expect-trt
 python -m unittest discover -s tests -v
 PYTHONPATH=runtime python -m unittest discover -s runtime/tests -v
 ```
+
+The tested TensorRT settings are in `deploy/cosyvoice2-tensorrt.env`; the
+matching systemd Python-path overlay is `deploy/cosyvoice2-tensorrt.conf`.
+TensorRT is deliberately installed outside the production virtualenv and the
+GPU-specific engine remains outside the model directory. The live engine
+manifest records its source ONNX hash, engine hash, GPU compute capability,
+driver, precision, revisions, and context count. Never copy a plan file to a
+different GPU/runtime combination without rebuilding and validating it.
 
 The read-only health check confirms readiness, placement, and both pinned
 revisions. A production acceptance test should additionally synthesize a short

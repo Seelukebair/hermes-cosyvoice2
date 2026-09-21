@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.11.0
+
+- Add explicit post-placement JIT and TensorRT flow acceleration controls while
+  keeping both disabled by default.
+- Expose effective accelerator state and TensorRT context count through health.
+- Add a tested RTX 3090 FP16 TensorRT deployment profile with an isolated
+  Python-package overlay and external engine path.
+- Extend runtime verification with `--expect-jit` and `--expect-trt` assertions.
+
 ## 1.10.0
 
 - Add bounded CPU reference-conditioning caching and persisted-profile startup

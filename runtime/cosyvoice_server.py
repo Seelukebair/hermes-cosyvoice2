@@ -13,6 +13,14 @@ import wave
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 
+
+def _boolean_env(name: str, default: bool) -> bool:
+    value = os.environ.get(name, "true" if default else "false").strip().lower()
+    if value not in {"true", "false", "1", "0", "yes", "no"}:
+        raise RuntimeError(f"{name} must be a boolean")
+    return value in {"true", "1", "yes"}
+
+
 _legacy_device = os.environ.get("COSYVOICE_DEVICE", "cpu").lower()
 PLACEMENT = os.environ.get(
     "COSYVOICE_PLACEMENT", "all-gpu" if _legacy_device == "cuda" else "cpu"
@@ -26,6 +34,14 @@ VALID_PLACEMENTS = {
     "all-gpu",
 }
 GPU_WEIGHT_DTYPE = os.environ.get("COSYVOICE_GPU_WEIGHT_DTYPE", "fp32").lower()
+LOAD_JIT = _boolean_env("COSYVOICE_LOAD_JIT", False)
+LOAD_TRT = _boolean_env("COSYVOICE_LOAD_TRT", False)
+try:
+    TRT_CONCURRENT = int(os.environ.get("COSYVOICE_TRT_CONCURRENT", "1"))
+except ValueError as exc:
+    raise RuntimeError("COSYVOICE_TRT_CONCURRENT must be a positive integer") from exc
+if TRT_CONCURRENT < 1:
+    raise RuntimeError("COSYVOICE_TRT_CONCURRENT must be a positive integer")
 if GPU_WEIGHT_DTYPE not in {"fp32", "fp16"}:
     raise RuntimeError("COSYVOICE_GPU_WEIGHT_DTYPE must be fp32 or fp16")
 if PLACEMENT not in VALID_PLACEMENTS:
@@ -67,10 +83,7 @@ def _cache_limit(name: str, default: int) -> int:
 
 
 def _enabled(name: str, default: bool) -> bool:
-    value = os.environ.get(name, "true" if default else "false").strip().lower()
-    if value not in {"true", "false", "1", "0", "yes", "no"}:
-        raise RuntimeError(f"{name} must be a boolean")
-    return value in {"true", "1", "yes"}
+    return _boolean_env(name, default)
 
 
 def _conditioning_key(args: argparse.Namespace, prompt, mode: str, conditioning_text: str) -> ConditioningKey:
@@ -181,6 +194,57 @@ def load_model(model_dir: Path):
     place(runtime.hift, hift_device, allow_fp16=False)
     runtime.fp16 = wants_gpu and GPU_WEIGHT_DTYPE == "fp16"
 
+    acceleration = {
+        "jit_flow_encoder": False,
+        "tensorrt_flow_decoder": False,
+        "tensorrt_contexts": 0,
+    }
+    if LOAD_JIT:
+        if flow_device.type != "cuda":
+            raise RuntimeError("COSYVOICE_LOAD_JIT requires the flow component on CUDA")
+        jit_path = Path(
+            os.environ.get(
+                "COSYVOICE_JIT_FLOW_ENCODER",
+                str(model_dir / f"flow.encoder.{GPU_WEIGHT_DTYPE}.zip"),
+            )
+        )
+        if not jit_path.is_file():
+            raise RuntimeError(f"CosyVoice JIT flow encoder not found: {jit_path}")
+        runtime.device = flow_device
+        runtime.load_jit(str(jit_path))
+        place(runtime.flow.encoder, flow_device)
+        acceleration["jit_flow_encoder"] = True
+
+    if LOAD_TRT:
+        if flow_device.type != "cuda":
+            raise RuntimeError("COSYVOICE_LOAD_TRT requires the flow component on CUDA")
+        engine_path = Path(
+            os.environ.get(
+                "COSYVOICE_TRT_ENGINE",
+                str(model_dir / f"flow.decoder.estimator.{GPU_WEIGHT_DTYPE}.mygpu.plan"),
+            )
+        )
+        onnx_path = Path(
+            os.environ.get(
+                "COSYVOICE_TRT_ONNX",
+                str(model_dir / "flow.decoder.estimator.fp32.onnx"),
+            )
+        )
+        if not onnx_path.is_file():
+            raise RuntimeError(f"CosyVoice TensorRT ONNX model not found: {onnx_path}")
+        engine_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime.device = flow_device
+        runtime.load_trt(
+            str(engine_path),
+            str(onnx_path),
+            TRT_CONCURRENT,
+            runtime.fp16,
+        )
+        acceleration.update(
+            tensorrt_flow_decoder=True,
+            tensorrt_contexts=TRT_CONCURRENT,
+        )
+
     original_llm_job = runtime.llm_job
     original_token2wav = runtime.token2wav
     original_hift_inference = runtime.hift.inference
@@ -222,6 +286,7 @@ def load_model(model_dir: Path):
         "gpu_weight_dtype": GPU_WEIGHT_DTYPE,
         "hift_weight_dtype": "fp32",
         "cuda_autocast": runtime.fp16,
+        "acceleration": acceleration,
     }
 
 

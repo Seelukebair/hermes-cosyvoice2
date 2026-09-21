@@ -26,6 +26,7 @@ build/
 /backups/
 /artifacts/
 /downloads/
+/test-output/
 /cosyvoice2.service
 voice_profiles/
 profiles/

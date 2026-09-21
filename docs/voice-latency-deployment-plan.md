@@ -1,8 +1,8 @@
 # CosyVoice2 voice latency deployment plan
 
-Status: CVL-01 through CVL-04 deployed and automatically validated on
-2026-09-21. Physical mobile playback/listening approval remains operator-owned.
-CVL-05 is deferred as an optional test-and-promote experiment.
+Status: CVL-01 through CVL-04 and the TensorRT portion of CVL-05 were deployed
+and automatically validated on 2026-09-21. JIT remains deferred. Physical
+mobile playback/listening approval remains operator-owned.
 
 ## Deployment result
 
@@ -22,10 +22,19 @@ CVL-05 is deferred as an optional test-and-promote experiment.
   `tts.jarvis_cosyvoice`; buffered compatibility produced a decodable 2.93 s MP3.
   The protected conversation adapter returned a 108-character answer without
   logging content or credentials.
-- With Gemma and CosyVoice resident after acceptance, the GPU reported 20,931
-  MiB used and 3,194 MiB free. JIT/TensorRT was not promoted because streaming
-  solved the delivery bottleneck without consuming the remaining shared-GPU
-  margin.
+- TensorRT 10.13.3.9 compiled the FP16 flow decoder for the RTX 3090 in 109.42
+  seconds. Build allocator peak was 2,308 MiB, the engine is 169,643,716 bytes,
+  and one execution context added about 346 MiB to the complete shared-GPU
+  deployment. Gemma plus accelerated CosyVoice reported 21,315 MiB used and
+  2,810 MiB free after production synthesis.
+- Three warm TensorRT streaming repetitions measured median first PCM at 1.98 s
+  (short), 2.84 s (medium), and 2.75 s (long). Relative to the earlier five-run
+  streaming baseline, first PCM improved about 37%, 40%, and 40%; median long
+  completion improved from 16.76 s to 13.01 s. All retained profiles generated
+  complete requested text under TensorRT in local Whisper checks.
+- A synthetic 12.81 s `Test Pilot` profile was created as a clone-path
+  acceptance fixture. It remains the session selection for operator listening;
+  Samuel remains the persistent default.
 - Rollback snapshot:
   `/srv/jarvis-backups/2026-09-20/cosyvoice-latency/20260921T073603Z-streaming-deployment`.
 Review date: 2026-09-20 America/Anchorage.
@@ -208,7 +217,8 @@ If app decoding buffers despite server streaming, report that as a blocker.
 
 ### CVL-05: Optional JIT and TensorRT acceleration
 
-Status: deferred. Dependencies: CVL-01; test against accepted streaming/cache build.
+Status: TensorRT deployed; JIT deferred. Dependencies: CVL-01; tested against
+the accepted streaming/cache build.
 
 1. Inventory exact artifacts, versions, and kernels. Stage immutable candidate
    artifacts outside model/profile data; never upgrade the production venv in place.
