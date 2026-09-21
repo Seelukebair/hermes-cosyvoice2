@@ -356,8 +356,10 @@ class VoiceManager:
         duration = float(entry.get("duration") or 0)
         if 30 <= duration <= 900:
             score += 0.08
-        if any(term in title for term in ("music", "song", "trailer", "film", "movie", "animation", "compilation", "reaction", "gameplay")):
+        if any(term in title for term in ("music", "song", "trailer", "compilation", "reaction", "gameplay")):
             score -= 0.25
+        if any(term in title for term in ("scene", "clip", "monologue", "speech", "voice lines", "movie")):
+            score += 0.08
         return round(max(0.05, min(0.95, score)), 2)
 
     @staticmethod

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.9.2
+
+- Prefer canonical theatrical character performances over actor interviews or
+  commentary while retaining interview preference for real-person profiles.
+- Preserve character-defining cinematic vocal processing during cleanup.
+
 ## 1.9.1
 
 - Enforce character-only profile display names and one saved profile per

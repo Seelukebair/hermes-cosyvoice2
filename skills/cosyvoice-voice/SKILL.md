@@ -39,6 +39,12 @@ session voice and persistent default; do not answer from memory.
    is better than a 15-second cinematic sample. If a supplied movie source has
    music, use an externally validated vocal-isolated reference or return a clear
    source-quality limitation; do not silently save the contaminated audio.
+   For fictional characters, prefer a genuine in-character theatrical scene,
+   monologue, or canonical voice-line performance over an interview with the
+   actor, neutral narration, commentary, or an impression. For real people,
+   continue to prefer clean direct interviews. Preserve vocal processing that
+   is intrinsic to the character's recognizable voice; remove music, ambience,
+   and effects without flattening the defining cinematic treatment.
 3. Report the selected source, timings, saved profile id, default/session scope,
    persistence verification, and any returned refinements. Never claim success
    unless `selection.selected_profile_id` matches the created profile and

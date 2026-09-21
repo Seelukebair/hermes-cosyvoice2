@@ -454,6 +454,19 @@ class VoiceManagerTests(unittest.TestCase):
         self.assertIn("compilation_or_music", VoiceManager._source_flags({"title": "Vintage radio playlist"}))
         self.assertIn("commentary_or_review", VoiceManager._source_flags({"title": "My Serious PROBLEM With Optimus Prime"}))
 
+    def test_theatrical_character_sources_outrank_commentary(self) -> None:
+        theatrical = VoiceManager._source_confidence(
+            {"title": "JARVIS movie scene voice lines", "duration": 90},
+            "JARVIS voice",
+            0,
+        )
+        commentary = VoiceManager._source_confidence(
+            {"title": "JARVIS movie reaction and gameplay", "duration": 90},
+            "JARVIS voice",
+            0,
+        )
+        self.assertGreater(theatrical, commentary)
+
 
 if __name__ == "__main__":
     unittest.main()
