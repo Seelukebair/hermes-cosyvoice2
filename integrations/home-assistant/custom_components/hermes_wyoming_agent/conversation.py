@@ -19,11 +19,11 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util.yaml.loader import load_yaml_dict
 
 from .const import (
-    CONF_NODE_RED_AUTH_SECRET,
+    CONF_NODE_RED_CREDENTIALS,
     CONF_NODE_RED_URL,
     CONF_STALL_ACK_SECONDS,
     CONF_STALL_ACK_TEXT,
-    DEFAULT_NODE_RED_AUTH_SECRET,
+    DEFAULT_NODE_RED_CREDENTIALS,
     DEFAULT_STALL_ACK_SECONDS,
     DEFAULT_STALL_ACK_TEXT,
     DOMAIN,
@@ -68,9 +68,9 @@ class HermesWyomingAgent(
         self._node_red_url = entry.options.get(CONF_NODE_RED_URL) or entry.data.get(
             CONF_NODE_RED_URL
         )
-        self._node_red_auth_secret = entry.options.get(
-            CONF_NODE_RED_AUTH_SECRET,
-            entry.data.get(CONF_NODE_RED_AUTH_SECRET, DEFAULT_NODE_RED_AUTH_SECRET),
+        self._node_red_credentials = entry.options.get(
+            CONF_NODE_RED_CREDENTIALS,
+            entry.data.get(CONF_NODE_RED_CREDENTIALS, DEFAULT_NODE_RED_CREDENTIALS),
         )
         self._node_red_auth: aiohttp.BasicAuth | None = None
         self._stall_ack_seconds = float(
@@ -150,7 +150,7 @@ class HermesWyomingAgent(
         """Resolve Node-RED credentials from HA's protected secrets file."""
         if self._node_red_auth is not None:
             return self._node_red_auth
-        secret_name = str(self._node_red_auth_secret or "").strip()
+        secret_name = str(self._node_red_credentials or "").strip()
         if not secret_name:
             raise HomeAssistantError("Node-RED auth secret is not configured")
 

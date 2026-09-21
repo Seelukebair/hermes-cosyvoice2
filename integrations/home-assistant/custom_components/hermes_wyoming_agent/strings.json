@@ -6,7 +6,7 @@
         "description": "Connect Home Assistant Assist to the local Hermes voice route.",
         "data": {
           "node_red_url": "Node-RED URL",
-          "node_red_auth_secret": "Node-RED auth secret name",
+          "node_red_credentials": "Node-RED credential reference",
           "stall_ack_seconds": "Stall acknowledgement delay",
           "stall_ack_text": "Stall acknowledgement text"
         }
@@ -19,7 +19,7 @@
         "title": "Hermes Proxy Agent options",
         "data": {
           "node_red_url": "Node-RED URL",
-          "node_red_auth_secret": "Node-RED auth secret name",
+          "node_red_credentials": "Node-RED credential reference",
           "stall_ack_seconds": "Stall acknowledgement delay",
           "stall_ack_text": "Stall acknowledgement text"
         }

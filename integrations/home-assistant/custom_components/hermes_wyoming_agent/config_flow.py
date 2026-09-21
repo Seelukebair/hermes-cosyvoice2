@@ -6,11 +6,11 @@ import voluptuous as vol
 from homeassistant import config_entries
 
 from .const import (
-    CONF_NODE_RED_AUTH_SECRET,
+    CONF_NODE_RED_CREDENTIALS,
     CONF_NODE_RED_URL,
     CONF_STALL_ACK_SECONDS,
     CONF_STALL_ACK_TEXT,
-    DEFAULT_NODE_RED_AUTH_SECRET,
+    DEFAULT_NODE_RED_CREDENTIALS,
     DEFAULT_NODE_RED_URL,
     DEFAULT_STALL_ACK_SECONDS,
     DEFAULT_STALL_ACK_TEXT,
@@ -27,9 +27,9 @@ def _schema(data: dict | None = None) -> vol.Schema:
                 default=values.get(CONF_NODE_RED_URL, DEFAULT_NODE_RED_URL),
             ): str,
             vol.Optional(
-                CONF_NODE_RED_AUTH_SECRET,
+                CONF_NODE_RED_CREDENTIALS,
                 default=values.get(
-                    CONF_NODE_RED_AUTH_SECRET, DEFAULT_NODE_RED_AUTH_SECRET
+                    CONF_NODE_RED_CREDENTIALS, DEFAULT_NODE_RED_CREDENTIALS
                 ),
             ): str,
             vol.Optional(
