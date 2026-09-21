@@ -28,9 +28,11 @@ def main() -> int:
         "ready": payload.get("ready") is True,
         "source_revision": not args.expect_source or payload.get("source_revision") == args.expect_source,
         "model_revision": not args.expect_model or payload.get("model_revision") == args.expect_model,
-        "jit_flow_encoder": not args.expect_jit or acceleration.get("jit_flow_encoder") is True,
-        "tensorrt_flow_decoder": not args.expect_trt or acceleration.get("tensorrt_flow_decoder") is True,
     }
+    if args.expect_jit:
+        checks["jit_flow_encoder"] = acceleration.get("jit_flow_encoder") is True
+    if args.expect_trt:
+        checks["tensorrt_flow_decoder"] = acceleration.get("tensorrt_flow_decoder") is True
     result = {"ok": all(checks.values()), "checks": checks, "health": payload}
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["ok"] else 1
