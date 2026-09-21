@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.12.3
+
+- Ensure continuous-synthesis session IDs always begin with an alphanumeric
+  character so Home Assistant does not reject valid URL-safe IDs and fall back
+  to the secondary TTS voice.
+- Pad newly cleaned conditioning clips at both boundaries and require
+  sentence-complete reference transcripts to prevent prompt-tail speech from
+  leaking into new utterances.
+
+## 1.12.2
+
+- Prefix buffered and streaming WAV output with 250 ms of configurable digital
+  silence so clients do not clip the beginning of speech.
+- Expose the effective output padding in runtime health. Keep reference audio
+  unchanged so zero-shot transcript/audio alignment is not weakened.
+
 ## 1.12.1
 
 - Add continuous sentence streaming for Home Assistant: completed answer

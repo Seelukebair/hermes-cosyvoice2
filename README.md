@@ -132,10 +132,13 @@ Each saved profile contains:
 Voice creation can run an isolated reference cleaner before transcription by
 setting `COSYVOICE_CLEAN_REFERENCE_COMMAND`. The command receives
 `{input_path}` and `{output_path}` placeholders. `runtime/clean_reference.py`
-provides the production implementation: BS-RoFormer dialogue isolation followed
-by conservative removal of pauses longer than 350 ms. Cleaned output must still
-pass the normal 10-15 second signal contract; otherwise creation retains the raw
-reference and records `fallback_raw` in profile metadata. Use
+provides the production implementation: BS-RoFormer dialogue isolation,
+conservative removal of pauses longer than 350 ms, and 150 ms of deterministic
+PCM silence at both conditioning boundaries. The transcript must end with the
+last complete spoken sentence; partial following words are rejected during
+operator review. Cleaned output must still pass the normal 10-15 second signal
+contract; otherwise creation retains the raw reference and records
+`fallback_raw` in profile metadata. Use
 `deploy/install-reference-cleaner.sh` to create the isolated runtime and
 `deploy/hermes-gateway-reference-cleaner.conf` to activate it for Hermes.
 - `recent_sources.json`: bounded source authorization used by the acquisition workflow.
@@ -196,6 +199,11 @@ python -m unittest discover -s integrations/home-assistant/tests -v
 Runtime and profile behavior are covered by CPU-only tests. GPU synthesis,
 speaker similarity, and end-to-end audio delivery remain deployment acceptance
 tests because they require the pinned model and real hardware.
+
+Generated WAV responses include 250 ms of leading digital silence by default
+to protect speech onset during client playback. Set
+`COSYVOICE_OUTPUT_LEADING_SILENCE_SECONDS` between `0` and `2` to tune or disable
+it; this padding is not added to cloning references.
 
 ## License
 

@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -83,6 +84,18 @@ class SynthesisSessionStoreTests(unittest.TestCase):
         with self.assertRaises(SessionLimitExceeded):
             byte_limited.enqueue(session.session_id, "two")
         self.assertEqual(1, byte_limited.snapshot()["rejected_bytes"])
+
+    def test_session_ids_remain_route_safe_for_all_urlsafe_prefixes(self):
+        store = self.store()
+        for unsafe_token in ("-leading-dash", "_leading-underscore"):
+            with mock.patch(
+                "synthesis_sessions.secrets.token_urlsafe", return_value=unsafe_token
+            ):
+                session = store.create(
+                    "test", prompt=object(), instruct="", speed=1.0
+                )
+            self.assertRegex(session.session_id, r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+            store.cleanup(session.session_id, "completed")
 
     def test_finish_rejects_future_text_after_draining_queued_sentences(self):
         store = self.store()

@@ -62,7 +62,7 @@ from starlette.concurrency import run_in_threadpool
 from cosyvoice.cli.cosyvoice import AutoModel
 from conditioning_cache import ConditioningCache, ConditioningKey, fingerprint_file, hash_text
 from profile_warmer import ProfileWarmer, prompt_signature
-from streaming_audio import iter_streaming_wav
+from streaming_audio import iter_streaming_wav, silence_pcm16
 from synthesis_sessions import (
     SessionCancelled,
     SessionConflict,
@@ -115,6 +115,16 @@ def _positive_env(name: str, default: int | float) -> int | float:
     if parsed <= 0:
         raise RuntimeError(f"{name} must be positive")
     return parsed
+
+
+def _bounded_float_env(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}")
+    return value
 
 
 def _conditioning_key(args: argparse.Namespace, prompt, mode: str, conditioning_text: str) -> ConditioningKey:
@@ -374,7 +384,9 @@ def load_model(model_dir: Path):
     }
 
 
-def wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
+def wav_bytes(
+    audio: np.ndarray, sample_rate: int, *, leading_silence_seconds: float = 0.0
+) -> bytes:
     samples = np.clip(audio, -1.0, 1.0)
     pcm = (samples * 32767.0).astype("<i2").tobytes()
     output = io.BytesIO()
@@ -382,7 +394,7 @@ def wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
         wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(sample_rate)
-        wav.writeframes(pcm)
+        wav.writeframes(silence_pcm16(sample_rate, leading_silence_seconds) + pcm)
     return output.getvalue()
 
 
@@ -391,6 +403,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     metrics_lock = threading.Lock()
     state: dict[str, object] = {
         "ready": False,
+        "output_leading_silence_seconds": _bounded_float_env(
+            "COSYVOICE_OUTPUT_LEADING_SILENCE_SECONDS", 0.25, 0.0, 2.0
+        ),
         "conditioning_cache": ConditioningCache(
             max_entries=_cache_limit("COSYVOICE_CONDITIONING_CACHE_ENTRIES", 8),
             max_bytes=_cache_limit("COSYVOICE_CONDITIONING_CACHE_MAX_BYTES", 256 * 1024 * 1024),
@@ -485,6 +500,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             "warmup": state.get("warmup", {}),
             "profile_warmer": state["profile_warmer"].snapshot() if state.get("profile_warmer") else {},
             "synthesis_sessions": state["synthesis_sessions"].snapshot(),
+            "output_leading_silence_seconds": state["output_leading_silence_seconds"],
             "last_synthesis": last_synthesis,
         }
 
@@ -591,7 +607,14 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 "audio_duration_ms": round((combined.size / model.sample_rate) * 1000, 2),
             }
         )
-        return Response(wav_bytes(combined, model.sample_rate), media_type="audio/wav")
+        return Response(
+            wav_bytes(
+                combined,
+                model.sample_rate,
+                leading_silence_seconds=state["output_leading_silence_seconds"],
+            ),
+            media_type="audio/wav",
+        )
 
     @app.post("/synthesize-stream")
     def synthesize_stream(request: SynthesisRequest) -> StreamingResponse:
@@ -692,7 +715,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 state["profiles"].consume(prompt)
 
         return StreamingResponse(
-            iter_streaming_wav(model_audio(), model.sample_rate, request.speed),
+            iter_streaming_wav(
+                model_audio(),
+                model.sample_rate,
+                request.speed,
+                leading_silence_seconds=state["output_leading_silence_seconds"],
+            ),
             media_type="audio/wav",
             headers={
                 "Cache-Control": "no-store",
@@ -826,6 +854,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     itertools.chain((first_audio,), model_stream),
                     model.sample_rate,
                     session.speed,
+                    leading_silence_seconds=state["output_leading_silence_seconds"],
                 )
                 for payload in audio_stream:
                     yield payload

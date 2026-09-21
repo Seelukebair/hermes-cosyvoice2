@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import sys
 import types
 import unittest
+import wave
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
@@ -75,6 +77,19 @@ class FakeProfiles:
 
 
 class SynthesisSessionRouteTests(unittest.IsolatedAsyncioTestCase):
+    def test_buffered_wav_includes_configured_leading_silence(self):
+        payload = server.wav_bytes(
+            np.array([0.5, -0.5], dtype=np.float32),
+            24000,
+            leading_silence_seconds=0.25,
+        )
+        with wave.open(io.BytesIO(payload), "rb") as wav_file:
+            pcm = wav_file.readframes(wav_file.getnframes())
+        self.assertEqual(b"\x00\x00" * 6000, pcm[:12000])
+        self.assertEqual(
+            pcm16_bytes(np.array([0.5, -0.5], dtype=np.float32)), pcm[12000:]
+        )
+
     def make_app(self):
         profiles = FakeProfiles()
         model = SimpleNamespace(sample_rate=24000)
@@ -92,6 +107,7 @@ class SynthesisSessionRouteTests(unittest.IsolatedAsyncioTestCase):
             "COSYVOICE_SYNTHESIS_SESSION_MAX_TEXT_BYTES": "64",
             "COSYVOICE_SYNTHESIS_SESSION_IDLE_TIMEOUT_SECONDS": "30",
             "COSYVOICE_SYNTHESIS_SESSION_TOTAL_TIMEOUT_SECONDS": "60",
+            "COSYVOICE_OUTPUT_LEADING_SILENCE_SECONDS": "0.25",
         }
         args = SimpleNamespace(
             model_dir=Path("model"),
@@ -134,7 +150,10 @@ class SynthesisSessionRouteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(1, payload.count(streaming_wav_header(24000)))
                 self.assertEqual(streaming_wav_header(24000), payload[:44])
                 self.assertEqual(
-                    pcm16_bytes(np.array([0.0, 0.5, -0.5, 1.0], dtype=np.float32)),
+                    (b"\x00\x00" * 6000)
+                    + pcm16_bytes(
+                        np.array([0.0, 0.5, -0.5, 1.0], dtype=np.float32)
+                    ),
                     payload[44:],
                 )
                 self.assertEqual(1, profiles.resolve_calls)

@@ -14,6 +14,7 @@ from pathlib import Path
 
 MIN_SECONDS = 10.0
 MAX_SECONDS = 15.0
+BOUNDARY_SILENCE_SECONDS = 0.15
 
 
 def run(command: list[str], timeout: int) -> None:
@@ -25,6 +26,17 @@ def run(command: list[str], timeout: int) -> None:
 def duration(path: Path) -> float:
     with wave.open(str(path), "rb") as audio:
         return audio.getnframes() / audio.getframerate()
+
+
+def pad_boundaries(input_path: Path, output_path: Path) -> None:
+    """Isolate prompt speech from synthesis with deterministic PCM silence."""
+    delay_ms = round(BOUNDARY_SILENCE_SECONDS * 1000)
+    run([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(input_path), "-af",
+        f"adelay={delay_ms}:all=1,apad=pad_dur={BOUNDARY_SILENCE_SECONDS}",
+        "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(output_path),
+    ], 45)
 
 
 def main() -> int:
@@ -65,6 +77,7 @@ def main() -> int:
 
         separated = work / "separated.wav"
         compacted = work / "compacted.wav"
+        boundary_padded = work / "boundary-padded.wav"
         run([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(stems[0]), "-ac", "1", "-ar", "24000",
@@ -79,16 +92,20 @@ def main() -> int:
         ], 45)
 
         selected = compacted if MIN_SECONDS <= duration(compacted) <= MAX_SECONDS else separated
-        selected_duration = duration(selected)
+        pad_boundaries(selected, boundary_padded)
+        selected_duration = duration(boundary_padded)
         if not MIN_SECONDS <= selected_duration <= MAX_SECONDS:
-            raise RuntimeError(f"cleaned duration is outside {MIN_SECONDS}-{MAX_SECONDS} seconds")
-        shutil.copy2(selected, args.output)
+            raise RuntimeError(
+                f"boundary-padded duration is outside {MIN_SECONDS}-{MAX_SECONDS} seconds"
+            )
+        shutil.copy2(boundary_padded, args.output)
 
     print(json.dumps({
         "status": "cleaned",
         "method": "bs_roformer_with_conservative_pause_compaction",
         "duration_seconds": round(selected_duration, 3),
         "pause_compaction_applied": selected == compacted,
+        "boundary_silence_seconds": BOUNDARY_SILENCE_SECONDS,
     }, sort_keys=True))
     return 0
 

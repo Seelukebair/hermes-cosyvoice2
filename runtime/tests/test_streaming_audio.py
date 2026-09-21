@@ -5,7 +5,12 @@ import wave
 
 import numpy as np
 
-from streaming_audio import iter_streaming_wav, pcm16_bytes, streaming_wav_header
+from streaming_audio import (
+    iter_streaming_wav,
+    pcm16_bytes,
+    silence_pcm16,
+    streaming_wav_header,
+)
 
 
 class StreamingAudioTests(unittest.TestCase):
@@ -29,6 +34,18 @@ class StreamingAudioTests(unittest.TestCase):
         output = list(iter_streaming_wav(chunks, 24000, 1.0))
         self.assertEqual(streaming_wav_header(24000), output[0])
         self.assertEqual(pcm16_bytes(np.concatenate(chunks)), b"".join(output[1:]))
+
+    def test_leading_silence_precedes_audio_without_entering_the_header(self):
+        sample_rate = 24000
+        audio = np.array([0.5, -0.5], dtype=np.float32)
+        output = list(
+            iter_streaming_wav(
+                [audio], sample_rate, 1.0, leading_silence_seconds=0.25
+            )
+        )
+        self.assertEqual(streaming_wav_header(sample_rate), output[0])
+        self.assertEqual(silence_pcm16(sample_rate, 0.25), output[1])
+        self.assertEqual(pcm16_bytes(audio), output[2])
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is not installed")
     def test_tempo_filter_emits_decodable_pcm(self):

@@ -22,6 +22,15 @@ def pcm16_bytes(audio: np.ndarray) -> bytes:
     return (samples * 32767.0).astype("<i2").tobytes()
 
 
+def silence_pcm16(sample_rate: int, seconds: float) -> bytes:
+    """Return an exact duration of mono PCM16 digital silence."""
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be positive")
+    if seconds < 0:
+        raise ValueError("silence duration cannot be negative")
+    return b"\x00\x00" * round(sample_rate * seconds)
+
+
 def streaming_wav_header(sample_rate: int) -> bytes:
     """Return Home Assistant's unknown-length WAV header (zero frames)."""
     output = io.BytesIO()
@@ -45,6 +54,7 @@ def iter_streaming_wav(
     speed: float,
     *,
     ffmpeg_path: str = "ffmpeg",
+    leading_silence_seconds: float = 0.0,
 ) -> Iterator[bytes]:
     """Yield a streaming WAV header and continuously tempo-adjusted PCM.
 
@@ -53,6 +63,9 @@ def iter_streaming_wav(
     in its producer thread so the pinned CosyVoice runtime can finish cleanup.
     """
     yield streaming_wav_header(sample_rate)
+    leading_silence = silence_pcm16(sample_rate, leading_silence_seconds)
+    if leading_silence:
+        yield leading_silence
 
     if speed == 1.0:
         for audio in audio_chunks:

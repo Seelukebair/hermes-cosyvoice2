@@ -586,6 +586,9 @@ class VoiceManager:
                 "applied": True,
                 "method": str(cleaner_report.get("method") or "external_reference_cleaner"),
                 "pause_compaction_applied": bool(cleaner_report.get("pause_compaction_applied", False)),
+                "boundary_silence_seconds": float(
+                    cleaner_report.get("boundary_silence_seconds") or 0.0
+                ),
                 "metrics": cleaned_metrics,
             }
         except (OSError, RuntimeError, subprocess.TimeoutExpired, VoiceWorkflowError) as exc:

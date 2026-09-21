@@ -122,7 +122,10 @@ class SynthesisSessionStore:
                 raise SessionLimitExceeded("synthesis session capacity is full")
             now = self.clock()
             session = SynthesisSession(
-                session_id=secrets.token_urlsafe(24),
+                # HA and the bridge require an alphanumeric first character.
+                # token_urlsafe() may begin with '-' or '_', so give every
+                # session a stable route-safe prefix.
+                session_id=f"s{secrets.token_urlsafe(24)}",
                 prompt=prompt,
                 instruct=instruct,
                 speed=speed,
