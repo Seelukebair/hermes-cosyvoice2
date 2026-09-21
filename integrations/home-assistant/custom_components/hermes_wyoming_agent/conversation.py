@@ -9,6 +9,7 @@ import json
 import logging
 import time
 import uuid
+import re
 
 import aiohttp
 from homeassistant.components import conversation
@@ -27,9 +28,22 @@ from .const import (
     DEFAULT_STALL_ACK_SECONDS,
     DEFAULT_STALL_ACK_TEXT,
     DOMAIN,
+    CONF_HERMES_URL,
+    CONF_HERMES_CREDENTIALS,
+    DEFAULT_HERMES_URL,
+    DEFAULT_HERMES_CREDENTIALS,
 )
 
 _LOGGER = logging.getLogger(__name__)
+_BACKGROUND_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\bresearch\b", r"\binvestigate\b", r"\bdig into\b", r"\bdeep dive\b",
+        r"\blook into\b", r"\btroubleshoot\b", r"\bdiagnose\b", r"\banaly[sz]e\b",
+        r"\baudit\b", r"\bcheck (the )?logs?\b", r"\bfigure out\b", r"\breport back\b",
+        r"\bget back to (me|us)\b", r"\bwhy did\b", r"\bwhat caused\b", r"\broot cause\b",
+    )
+)
 
 
 def latency_log(request_id: str, event: str, **fields) -> None:
@@ -73,6 +87,12 @@ class HermesWyomingAgent(
             entry.data.get(CONF_NODE_RED_CREDENTIALS, DEFAULT_NODE_RED_CREDENTIALS),
         )
         self._node_red_auth: aiohttp.BasicAuth | None = None
+        self._hermes_url = entry.options.get(CONF_HERMES_URL, entry.data.get(CONF_HERMES_URL, DEFAULT_HERMES_URL))
+        self._hermes_credentials = entry.options.get(
+            CONF_HERMES_CREDENTIALS,
+            entry.data.get(CONF_HERMES_CREDENTIALS, DEFAULT_HERMES_CREDENTIALS),
+        )
+        self._hermes_token: str | None = None
         self._stall_ack_seconds = float(
             entry.options.get(
                 CONF_STALL_ACK_SECONDS,
@@ -106,7 +126,34 @@ class HermesWyomingAgent(
             device_id=user_input.device_id or "default_device",
             text_chars=len(user_input.text or ""),
         )
+        use_background = self._is_background_request(user_input.text)
         try:
+            if not use_background:
+                async def streaming_response() -> AsyncGenerator[dict, None]:
+                    emitted = False
+                    try:
+                        async for delta in self._stream_from_hermes(user_input, request_id):
+                            emitted = True
+                            yield {"role": "assistant", "content": delta}
+                    except Exception:
+                        if emitted:
+                            raise
+                        latency_log(request_id, "hermes_stream_fallback")
+                        fallback = await self._forward_to_nodered(
+                            user_input.text,
+                            user_input.context.user_id,
+                            user_input.device_id or "default_device",
+                            user_input.conversation_id,
+                            request_id,
+                        )
+                        yield {"role": "assistant", "content": fallback}
+
+                async for _ in chat_log.async_add_delta_content_stream(
+                    self.entity_id or DOMAIN, streaming_response()
+                ):
+                    pass
+                latency_log(request_id, "ha_conversation_return", elapsed_ms=round((time.monotonic() - started) * 1000), mode="stream")
+                return conversation.async_get_result_from_chat_log(user_input, chat_log)
             forward_task = asyncio.create_task(
                 self._forward_to_nodered(
                     user_input.text,
@@ -145,6 +192,92 @@ class HermesWyomingAgent(
         ):
             pass
         return conversation.async_get_result_from_chat_log(user_input, chat_log)
+
+    @staticmethod
+    def _is_background_request(text: str) -> bool:
+        normalized = str(text or "").strip().lower()
+        if re.match(r"^(quick|fast|answer now|right now)\b", normalized):
+            return False
+        return bool(
+            re.match(r"^(background|long task|research task|deep task)\b", normalized)
+            or any(pattern.search(normalized) for pattern in _BACKGROUND_PATTERNS)
+        )
+
+    async def _get_hermes_token(self) -> str:
+        if self._hermes_token is not None:
+            return self._hermes_token
+        secret_name = str(self._hermes_credentials or "").strip()
+
+        def load_secret() -> str:
+            values = load_yaml_dict(self.hass.config.path("secrets.yaml"))
+            auth = values.get(secret_name)
+            if isinstance(auth, str) and auth:
+                return auth
+            if isinstance(auth, dict):
+                token = auth.get("token") or auth.get("api_key") or auth.get("bearer_token")
+                if isinstance(token, str) and token:
+                    return token
+            raise HomeAssistantError("Hermes API auth secret is missing or invalid")
+
+        self._hermes_token = await self.hass.async_add_executor_job(load_secret)
+        return self._hermes_token
+
+    async def _stream_from_hermes(self, user_input, request_id: str) -> AsyncGenerator[str, None]:
+        """Yield final-answer text only; Hermes tool events remain unspoken."""
+        token = await self._get_hermes_token()
+        device = user_input.device_id or "default_device"
+        user_id = user_input.context.user_id or "unknown_user"
+        conversation_id = user_input.conversation_id or str(uuid.uuid4())
+        safe = lambda value: re.sub(r"[^A-Za-z0-9_.:-]", "_", str(value))[:96]
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Hermes-Session-Id": f"ha-conv-{safe(conversation_id)}",
+            "X-Hermes-Session-Key": f"ha-user-{safe(user_id)}-{safe(device)}",
+        }
+        body = {
+            "model": "default",
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": "You are Jarvis in a live Home Assistant voice session. Answer naturally and concisely for speech. Use tools when needed, but never narrate tool mechanics or expose tool JSON."},
+                {"role": "user", "content": user_input.text},
+            ],
+        }
+        timeout = aiohttp.ClientTimeout(total=180)
+        emitted = False
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(self._hermes_url, json=body, headers=headers) as response:
+                if response.status != 200:
+                    raise HomeAssistantError(f"Hermes stream returned HTTP {response.status}")
+                event_name = "message"
+                buffer = b""
+                async for chunk in response.content.iter_any():
+                    buffer += chunk
+                    while b"\n" in buffer:
+                        raw_line, buffer = buffer.split(b"\n", 1)
+                        line = raw_line.decode("utf-8", "replace").strip()
+                        if line.startswith("event:"):
+                            event_name = line[6:].strip()
+                            continue
+                        if not line or not line.startswith("data:"):
+                            if not line:
+                                event_name = "message"
+                            continue
+                        if event_name != "message":
+                            continue
+                        raw_data = line[5:].strip()
+                        if raw_data == "[DONE]":
+                            return
+                        try:
+                            payload = json.loads(raw_data)
+                            choice = (payload.get("choices") or [{}])[0]
+                            delta = (choice.get("delta") or {}).get("content")
+                        except (json.JSONDecodeError, AttributeError, IndexError):
+                            continue
+                        if isinstance(delta, str) and delta:
+                            emitted = True
+                            yield delta
+        if not emitted:
+            raise HomeAssistantError("Hermes stream returned no answer text")
 
     async def _get_node_red_auth(self) -> aiohttp.BasicAuth:
         """Resolve Node-RED credentials from HA's protected secrets file."""

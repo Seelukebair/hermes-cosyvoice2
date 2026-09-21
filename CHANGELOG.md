@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.12.0
+
+- Warm saved voice conditioning after profile switches or reference replacement.
+- Add test-and-promote CUDA ONNX speech-token preprocessing with health telemetry.
+- Stream ordinary Home Assistant conversations directly from Hermes as safe answer
+  deltas and synthesize completed sentences while later text is still generated.
+- Preserve the Node-RED background route and pre-output fallback behavior.
+
 ## 1.11.4
 
 - Resolve concise saved-profile requests such as `Switch to Jarvis` before

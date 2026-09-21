@@ -112,6 +112,11 @@ warm-up result, and content-free metadata for the last synthesis. Progressive
 clients use `POST /synthesize-stream`; the existing `POST /synthesize` contract
 is unchanged.
 
+Saved profile changes are watched and debounced so their reference conditioning
+is ready before the next request. `COSYVOICE_FRONTEND_ONNX_PROVIDER=cuda` is an
+optional test-and-promote setting for reference speech-token extraction; its
+effective providers are reported in health and CPU remains the default.
+
 ## Voice profiles
 
 The default profile root is `/srv/cosyvoice2/data/voice_profiles`. It remains

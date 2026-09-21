@@ -59,6 +59,7 @@ from pydantic import BaseModel, Field
 
 from cosyvoice.cli.cosyvoice import AutoModel
 from conditioning_cache import ConditioningCache, ConditioningKey, fingerprint_file, hash_text
+from profile_warmer import ProfileWarmer, prompt_signature
 from streaming_audio import iter_streaming_wav
 from upstream_guard import install_background_generation_guard
 from voice_profiles import VoiceProfileRegistry
@@ -137,6 +138,57 @@ def _conditioned_chunks(
             guard = getattr(model.model, "_jarvis_generation_guard", None)
             if guard is not None:
                 guard.pop_and_raise()
+
+
+def _configure_frontend_onnx(model, model_dir: Path) -> dict[str, object]:
+    """Optionally move reference speech-token extraction to ONNX CUDA."""
+    requested = os.environ.get("COSYVOICE_FRONTEND_ONNX_PROVIDER", "cpu").lower()
+    if requested not in {"cpu", "cuda"}:
+        raise RuntimeError("COSYVOICE_FRONTEND_ONNX_PROVIDER must be cpu or cuda")
+    if requested == "cuda":
+        import onnxruntime
+
+        available = onnxruntime.get_available_providers()
+        if "CUDAExecutionProvider" not in available:
+            raise RuntimeError("ONNX CUDA provider requested but unavailable")
+        tokenizer_path = model_dir / "speech_tokenizer_v2.onnx"
+        model.frontend.speech_tokenizer_session = onnxruntime.InferenceSession(
+            str(tokenizer_path),
+            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+    return {
+        "requested": requested,
+        "speech_tokenizer": model.frontend.speech_tokenizer_session.get_providers(),
+        "speaker_embedding": model.frontend.campplus_session.get_providers(),
+    }
+
+
+def _conditioning(model, args, prompt, instruct: str = ""):
+    effective_instruct = instruct.strip() or prompt.instruct
+    mode = "instruct2" if effective_instruct else "zero_shot"
+    conditioning_text = (
+        effective_instruct
+        if effective_instruct
+        else model.frontend.text_normalize(
+            prompt.prompt_text, split=False, text_frontend=True
+        )
+    )
+    key = _conditioning_key(args, prompt, mode, conditioning_text)
+
+    def build() -> dict:
+        if mode == "instruct2":
+            model_input = model.frontend.frontend_instruct2(
+                "", conditioning_text, str(prompt.prompt_wav), model.sample_rate, ""
+            )
+        else:
+            model_input = model.frontend.frontend_zero_shot(
+                "", conditioning_text, str(prompt.prompt_wav), model.sample_rate, ""
+            )
+        model_input.pop("text", None)
+        model_input.pop("text_len", None)
+        return _cpu_conditioning(model_input)
+
+    return key, mode, build
 
 
 def load_model(model_dir: Path):
@@ -279,6 +331,7 @@ def load_model(model_dir: Path):
     install_background_generation_guard(runtime)
     runtime.token2wav = types.MethodType(token2wav, runtime)
     runtime.hift.inference = hift_inference
+    frontend_onnx = _configure_frontend_onnx(model, model_dir)
     return model, {
         "llm": str(llm_device),
         "flow": str(flow_device),
@@ -287,6 +340,7 @@ def load_model(model_dir: Path):
         "hift_weight_dtype": "fp32",
         "cuda_autocast": runtime.fp16,
         "acceleration": acceleration,
+        "frontend_onnx": frontend_onnx,
     }
 
 
@@ -337,30 +391,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 warmup["status"] = "skipped_no_saved_profile"
             else:
                 try:
-                    instruct = prompt.instruct
-                    mode = "instruct2" if instruct else "zero_shot"
-                    conditioning_text = (
-                        instruct
-                        if instruct
-                        else model.frontend.text_normalize(
-                            prompt.prompt_text, split=False, text_frontend=True
-                        )
-                    )
-                    cache_key = _conditioning_key(args, prompt, mode, conditioning_text)
-
-                    def build_conditioning() -> dict:
-                        if mode == "instruct2":
-                            model_input = model.frontend.frontend_instruct2(
-                                "", conditioning_text, str(prompt.prompt_wav), model.sample_rate, ""
-                            )
-                        else:
-                            model_input = model.frontend.frontend_zero_shot(
-                                "", conditioning_text, str(prompt.prompt_wav), model.sample_rate, ""
-                            )
-                        model_input.pop("text", None)
-                        model_input.pop("text_len", None)
-                        return _cpu_conditioning(model_input)
-
+                    cache_key, mode, build_conditioning = _conditioning(model, args, prompt)
                     cached = state["conditioning_cache"].get_or_create(cache_key, build_conditioning)
                     with torch.inference_mode():
                         for _chunk in _conditioned_chunks(
@@ -373,9 +404,22 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     # reports the failed warm-up without exposing private data.
                     warmup.update(status="error", profile_id=prompt.profile_id)
             warmup["elapsed_ms"] = round((time.monotonic() - warmup_started_at) * 1000, 2)
-        state.update(warmup=warmup, ready=True)
+        def warm_profile(prompt) -> bool:
+            with lock, torch.inference_mode():
+                key, _mode, build = _conditioning(model, args, prompt)
+                return state["conditioning_cache"].get_or_create(key, build).hit
+
+        watcher = ProfileWarmer(
+            profiles.resolve_saved_default,
+            warm_profile,
+            initial_signature=prompt_signature(profiles.resolve_saved_default()),
+        )
+        if _enabled("COSYVOICE_PROFILE_WARMER_ENABLED", True):
+            watcher.start()
+        state.update(warmup=warmup, profile_warmer=watcher, ready=True)
         yield
         state["ready"] = False
+        watcher.stop()
 
     app = FastAPI(title="Jarvis CosyVoice2", docs_url=None, redoc_url=None, lifespan=lifespan)
 
@@ -392,6 +436,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             "source_revision": args.source_revision,
             "conditioning_cache": state["conditioning_cache"].snapshot(),
             "warmup": state.get("warmup", {}),
+            "profile_warmer": state["profile_warmer"].snapshot() if state.get("profile_warmer") else {},
             "last_synthesis": last_synthesis,
         }
 

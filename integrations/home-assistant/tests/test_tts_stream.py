@@ -103,6 +103,16 @@ class FakeSession:
         return self.context
 
 
+class SequencedSession:
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self.contexts = [FakeRequestContext(response) for response in responses]
+        self.calls = []
+
+    def post(self, url: str, **kwargs) -> FakeRequestContext:
+        self.calls.append((url, kwargs))
+        return self.contexts[len(self.calls) - 1]
+
+
 def _install_homeassistant_stubs() -> None:
     """Install only the imports required to exercise this custom component."""
     homeassistant = ModuleType("homeassistant")
@@ -221,6 +231,21 @@ class TtsStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.1, kwargs["json"]["speed"])
         self.assertTrue(response.closed)
         self.assertEqual(1, entity.hass.session.context.exited)
+
+    async def test_completed_sentences_open_sequential_streams(self) -> None:
+        entity = self._entity(FakeResponse(WAV_HEADER))
+        entity.hass.session = SequencedSession(
+            [FakeResponse(WAV_HEADER + b"one"), FakeResponse(WAV_HEADER + b"two")]
+        )
+        result = await entity.async_stream_tts_audio(
+            TTSAudioRequest("en-US", {}, _message(["First sentence. Sec", "ond sentence!"]))
+        )
+
+        self.assertEqual(WAV_HEADER + b"onetwo", await _consume(result.data_gen))
+        self.assertEqual(
+            ["First sentence.", "Second sentence!"],
+            [call[1]["json"]["text"] for call in entity.hass.session.calls],
+        )
 
     async def test_invalid_header_uses_fallback_before_audio(self) -> None:
         response = FakeResponse(b"NOTW" + (b"\x00" * 40))

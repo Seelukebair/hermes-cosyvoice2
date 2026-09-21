@@ -10,10 +10,14 @@ from .const import (
     CONF_NODE_RED_URL,
     CONF_STALL_ACK_SECONDS,
     CONF_STALL_ACK_TEXT,
+    CONF_HERMES_URL,
+    CONF_HERMES_CREDENTIALS,
     DEFAULT_NODE_RED_CREDENTIALS,
     DEFAULT_NODE_RED_URL,
     DEFAULT_STALL_ACK_SECONDS,
     DEFAULT_STALL_ACK_TEXT,
+    DEFAULT_HERMES_URL,
+    DEFAULT_HERMES_CREDENTIALS,
     DOMAIN,
 )
 
@@ -25,6 +29,14 @@ def _schema(data: dict | None = None) -> vol.Schema:
             vol.Required(
                 CONF_NODE_RED_URL,
                 default=values.get(CONF_NODE_RED_URL, DEFAULT_NODE_RED_URL),
+            ): str,
+            vol.Optional(
+                CONF_HERMES_URL,
+                default=values.get(CONF_HERMES_URL, DEFAULT_HERMES_URL),
+            ): str,
+            vol.Optional(
+                CONF_HERMES_CREDENTIALS,
+                default=values.get(CONF_HERMES_CREDENTIALS, DEFAULT_HERMES_CREDENTIALS),
             ): str,
             vol.Optional(
                 CONF_NODE_RED_CREDENTIALS,

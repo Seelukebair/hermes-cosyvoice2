@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -44,6 +45,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 _SUPPORTED_LANGUAGES = ["en-US", "en-GB", "en"]
+_SENTENCE_END = re.compile(r"(?<=[.!?])(?:[\"')\]]+)?\s+")
 
 
 async def async_setup_entry(
@@ -106,22 +108,45 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
         item. Collecting that one item here still lets the client play while
         CosyVoice generates, and avoids synthesizing arbitrary LLM token pieces.
         """
-        message = await self._async_collect_stream_message(request.message_gen)
-        payload = self._payload(message, request.options)
+        sentences = self._async_sentence_messages(request.message_gen)
+        try:
+            first_sentence = await anext(sentences)
+        except StopAsyncIteration as err:
+            raise HomeAssistantError("TTS stream input is empty") from err
+        payload = self._payload(first_sentence, request.options)
         if (
             len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
             > MAX_STREAM_REQUEST_BYTES
         ):
             raise HomeAssistantError("TTS stream request exceeds the bridge limit")
         try:
-            return await self._async_open_cosyvoice_stream(payload)
+            first = await self._async_open_cosyvoice_stream(payload)
+
+            async def sentence_audio() -> AsyncGenerator[bytes]:
+                async for chunk in first.data_gen:
+                    yield chunk
+                async for sentence in sentences:
+                    following = await self._async_open_cosyvoice_stream(
+                        self._payload(sentence, request.options)
+                    )
+                    skipped_header = False
+                    async for chunk in following.data_gen:
+                        if not skipped_header:
+                            skipped_header = True
+                            chunk = chunk[44:]
+                        if chunk:
+                            yield chunk
+
+            return TTSAudioResponse("wav", sentence_audio())
         except (ClientError, TimeoutError, HomeAssistantError, ValueError) as err:
             _LOGGER.warning(
                 "Jarvis CosyVoice stream unavailable before audio; trying fallback entity %s: %s",
                 self._fallback_entity_id,
                 err,
             )
-            extension, audio = await self._async_get_fallback_audio(message)
+            remaining = [first_sentence]
+            remaining.extend([sentence async for sentence in sentences])
+            extension, audio = await self._async_get_fallback_audio(" ".join(remaining))
 
             async def fallback_data_gen() -> AsyncGenerator[bytes]:
                 yield audio
@@ -178,6 +203,30 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
         if not message:
             raise HomeAssistantError("TTS stream input is empty")
         return message
+
+    async def _async_sentence_messages(
+        self, message_gen: AsyncGenerator[str]
+    ) -> AsyncGenerator[str]:
+        """Yield bounded complete sentences, retaining a final fragment."""
+        pending = ""
+        byte_count = 0
+        async for chunk in message_gen:
+            if not isinstance(chunk, str):
+                raise HomeAssistantError("TTS stream input must contain text")
+            byte_count += len(chunk.encode("utf-8"))
+            if byte_count > MAX_STREAM_MESSAGE_BYTES:
+                raise HomeAssistantError("TTS stream input exceeds the bridge limit")
+            pending += chunk
+            while True:
+                match = _SENTENCE_END.search(pending)
+                if match is None:
+                    break
+                sentence = pending[: match.start() + 1].strip()
+                pending = pending[match.end() :]
+                if sentence:
+                    yield sentence
+        if pending.strip():
+            yield pending.strip()
 
     async def _async_open_cosyvoice_stream(
         self, payload: dict[str, Any]
