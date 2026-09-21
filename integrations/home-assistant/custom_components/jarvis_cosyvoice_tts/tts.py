@@ -31,9 +31,11 @@ from .const import (
     CONF_BEARER_TOKEN,
     CONF_FALLBACK_ENTITY_ID,
     CONF_REQUEST_TIMEOUT,
+    CONF_MULTI_SENTENCE_STREAMING,
     DEFAULT_LANGUAGE,
     DEFAULT_SPEED,
     DEFAULT_VOICE,
+    DEFAULT_MULTI_SENTENCE_STREAMING,
     DOMAIN,
     OPTION_INSTRUCT,
     OPTION_SPEED,
@@ -79,6 +81,11 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
         self._token = entry.data[CONF_BEARER_TOKEN]
         self._fallback_entity_id = entry.data[CONF_FALLBACK_ENTITY_ID]
         self._request_timeout = int(entry.data[CONF_REQUEST_TIMEOUT])
+        self._multi_sentence_streaming = bool(
+            entry.data.get(
+                CONF_MULTI_SENTENCE_STREAMING, DEFAULT_MULTI_SENTENCE_STREAMING
+            )
+        )
 
     @callback
     def async_get_supported_voices(self, language: str) -> list[Voice]:
@@ -108,6 +115,31 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
         item. Collecting that one item here still lets the client play while
         CosyVoice generates, and avoids synthesizing arbitrary LLM token pieces.
         """
+        if not getattr(
+            self, "_multi_sentence_streaming", DEFAULT_MULTI_SENTENCE_STREAMING
+        ):
+            message = await self._async_collect_stream_message(request.message_gen)
+            payload = self._payload(message, request.options)
+            if (
+                len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+                > MAX_STREAM_REQUEST_BYTES
+            ):
+                raise HomeAssistantError("TTS stream request exceeds the bridge limit")
+            try:
+                return await self._async_open_cosyvoice_stream(payload)
+            except (ClientError, TimeoutError, HomeAssistantError, ValueError) as err:
+                _LOGGER.warning(
+                    "Jarvis CosyVoice stream unavailable before audio; trying fallback entity %s: %s",
+                    self._fallback_entity_id,
+                    err,
+                )
+                extension, audio = await self._async_get_fallback_audio(message)
+
+                async def buffered_fallback() -> AsyncGenerator[bytes]:
+                    yield audio
+
+                return TTSAudioResponse(extension, buffered_fallback())
+
         sentences = self._async_sentence_messages(request.message_gen)
         try:
             first_sentence = await anext(sentences)

@@ -15,9 +15,11 @@ from .const import (
     CONF_BEARER_TOKEN,
     CONF_FALLBACK_ENTITY_ID,
     CONF_REQUEST_TIMEOUT,
+    CONF_MULTI_SENTENCE_STREAMING,
     DEFAULT_BASE_URL,
     DEFAULT_FALLBACK_ENTITY_ID,
     DEFAULT_REQUEST_TIMEOUT,
+    DEFAULT_MULTI_SENTENCE_STREAMING,
     DOMAIN,
 )
 
@@ -100,6 +102,13 @@ class JarvisCosyVoiceConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT
                     ),
                 ): probatio.All(int, probatio.Range(min=10, max=600)),
+                probatio.Optional(
+                    CONF_MULTI_SENTENCE_STREAMING,
+                    default=(user_input or {}).get(
+                        CONF_MULTI_SENTENCE_STREAMING,
+                        DEFAULT_MULTI_SENTENCE_STREAMING,
+                    ),
+                ): bool,
             }
         )
         return self.async_show_form(

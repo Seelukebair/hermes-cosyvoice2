@@ -7,6 +7,9 @@
 - Stream ordinary Home Assistant conversations directly from Hermes as safe answer
   deltas and synthesize completed sentences while later text is still generated.
 - Preserve the Node-RED background route and pre-output fallback behavior.
+- Keep multi-sentence audio requests available as an experimental option, but
+  disable them by default because current HA mobile playback stops after the
+  first synthesized segment.
 
 ## 1.11.4
 

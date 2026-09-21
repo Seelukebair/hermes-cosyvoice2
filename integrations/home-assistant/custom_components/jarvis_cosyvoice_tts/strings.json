@@ -16,7 +16,8 @@
           "base_url": "Bridge URL",
           "bearer_token": "Bridge token",
           "fallback_entity_id": "Fallback TTS entity",
-          "request_timeout": "Request timeout (seconds)"
+          "request_timeout": "Request timeout (seconds)",
+          "multi_sentence_streaming": "Experimental multi-sentence audio streaming"
         }
       }
     }

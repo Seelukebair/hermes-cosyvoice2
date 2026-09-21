@@ -234,6 +234,7 @@ class TtsStreamTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_completed_sentences_open_sequential_streams(self) -> None:
         entity = self._entity(FakeResponse(WAV_HEADER))
+        entity._multi_sentence_streaming = True
         entity.hass.session = SequencedSession(
             [FakeResponse(WAV_HEADER + b"one"), FakeResponse(WAV_HEADER + b"two")]
         )
@@ -245,6 +246,19 @@ class TtsStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             ["First sentence.", "Second sentence!"],
             [call[1]["json"]["text"] for call in entity.hass.session.calls],
+        )
+
+    async def test_multi_sentence_streaming_is_disabled_by_default(self) -> None:
+        entity = self._entity(FakeResponse(WAV_HEADER + b"all"))
+        result = await entity.async_stream_tts_audio(
+            TTSAudioRequest("en-US", {}, _message(["First sentence. ", "Second sentence."]))
+        )
+
+        self.assertEqual(WAV_HEADER + b"all", await _consume(result.data_gen))
+        self.assertEqual(1, len(entity.hass.session.calls))
+        self.assertEqual(
+            "First sentence. Second sentence.",
+            entity.hass.session.calls[0][1]["json"]["text"],
         )
 
     async def test_invalid_header_uses_fallback_before_audio(self) -> None:
