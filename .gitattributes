@@ -1,0 +1,11 @@
+* text=auto
+
+# Linux deployment and runtime files must remain executable by Unix tooling.
+*.sh text eol=lf
+*.service text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.example text eol=lf
