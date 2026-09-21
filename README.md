@@ -57,7 +57,8 @@ constructs FP32 tensors internally.
 
 ### 2. Hermes provider and plugin
 
-Register the command provider with an atomic config backup:
+Register the command provider with an atomic config backup under
+`${JARVIS_BACKUP_ROOT:-/srv/jarvis-backups}/YYYY-MM-DD/cosyvoice2/`:
 
 ```bash
 python scripts/register_hermes_provider.py --activate --speed 1.10

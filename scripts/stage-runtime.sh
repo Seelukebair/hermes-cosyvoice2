@@ -27,7 +27,9 @@ done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$PREFIX/data/voice_profiles" "$PREFIX/backups"
+BACKUP_ROOT="${JARVIS_BACKUP_ROOT:-/srv/jarvis-backups}"
+BACKUP_DIR="$BACKUP_ROOT/$(date +%F)/cosyvoice2/${STAMP}-runtime-stage"
+mkdir -p "$PREFIX/data/voice_profiles"
 
 if [[ -d "$PREFIX/source/.git" ]]; then
   current="$(git -C "$PREFIX/source" rev-parse HEAD)"
@@ -66,7 +68,9 @@ fi
 }
 
 if [[ -d "$PREFIX/app" ]]; then
-  cp -a "$PREFIX/app" "$PREFIX/backups/app-$STAMP"
+  mkdir -p "$BACKUP_DIR"
+  chmod 700 "$BACKUP_DIR"
+  cp -a "$PREFIX/app" "$BACKUP_DIR/app"
 fi
 mkdir -p "$PREFIX/app"
 cp "$REPO_ROOT"/runtime/*.py "$PREFIX/app/"
@@ -83,4 +87,3 @@ sed \
 echo "runtime staged at $PREFIX"
 echo "rendered service unit: $PREFIX/cosyvoice2.service"
 echo "review and install the unit with your operating system service manager"
-

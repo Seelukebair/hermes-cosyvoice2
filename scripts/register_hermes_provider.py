@@ -63,7 +63,12 @@ def main() -> int:
         return 0
 
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup = args.config.with_name(f"config.yaml.pre-cosyvoice2-{stamp}")
+    backup_root = Path(os.environ.get("JARVIS_BACKUP_ROOT", "/srv/jarvis-backups"))
+    day = dt.datetime.now().astimezone().strftime("%Y-%m-%d")
+    backup_dir = backup_root / day / "cosyvoice2" / f"{stamp}-provider-registration"
+    backup_dir.mkdir(parents=True, mode=0o700)
+    os.chmod(backup_dir, 0o700)
+    backup = backup_dir / "config.yaml"
     shutil.copy2(args.config, backup)
     atomic_yaml(args.config, config)
     print(f"registered cosyvoice2; rollback: {backup}")
@@ -72,4 +77,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

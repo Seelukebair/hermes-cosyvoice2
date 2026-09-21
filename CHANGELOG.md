@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.9.3
+
+- Store operator-created runtime and provider-registration rollbacks beneath the
+  centralized dated Jarvis backup root instead of beside live files.
+
 ## 1.9.2
 
 - Prefer canonical theatrical character performances over actor interviews or

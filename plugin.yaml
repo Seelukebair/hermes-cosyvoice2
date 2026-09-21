@@ -1,5 +1,5 @@
 name: cosyvoice-voice
-version: "1.9.2"
+version: "1.9.3"
 description: "Hermes voice cloning, profiles, personality pairing, and a packaged CosyVoice2 runtime."
 author: "Jarvis Lab"
 kind: standalone
