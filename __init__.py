@@ -20,8 +20,13 @@ _VOICE_CHANGE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _VOICE_PROFILE_RE = re.compile(
-    r"\b(?:voice profile|voice clone|cloned voice|cosyvoice voice|voice\s*(?:/|and)?\s*personality|personality\s*(?:/|and)?\s*voice|mannerisms?|catchphrases?|key phrases?)\b",
+    r"\b(?:voice profiles?|voice clones?|cloned voices?|cosyvoice voices?|voice\s*(?:/|and)?\s*personality|personality\s*(?:/|and)?\s*voice|mannerisms?|catchphrases?|key phrases?)\b",
     re.IGNORECASE,
+)
+_VOICE_INVENTORY_RE = re.compile(
+    r"\b(?:which|what|list|show|available|saved|installed)\b.{0,64}\b(?:cloned\s+voices?|voice\s+profiles?)\b"
+    r"|\b(?:cloned\s+voices?|voice\s+profiles?)\b.{0,64}\b(?:available|saved|installed|do\s+(?:i|we|you)\s+have|are\s+there)\b",
+    re.IGNORECASE | re.DOTALL,
 )
 _VOICE_FOLLOWUP_RE = re.compile(
     r"\b(?:option|choice|source)\s*(?:one|two|three|four|five|[1-5])\b"
@@ -125,6 +130,7 @@ def _voice_intent_context(
     explicit = bool(
         _VOICE_CHANGE_RE.search(message)
         or _VOICE_PROFILE_RE.search(message)
+        or _VOICE_INVENTORY_RE.search(message)
         or _AUTONOMOUS_SEARCH_RE.search(message)
     )
     # Normal chat must not create runtime directories or fail merely because
@@ -175,7 +181,13 @@ def _voice_intent_context(
     disable_personality = bool(_PERSONALITY_DISABLE_RE.search(message) or (personality and bare_no))
     contexts: list[str] = []
     if personality and not disable_personality:
-        contexts.append("Active personality paired with the selected cloned voice: " + personality["prompt"])
+        contexts.append(
+            "The selected cloned-voice profile is the sole presentation personality for this response. "
+            "Jarvis remains the operational role and name, but do not mix generic Jarvis mannerisms or any "
+            "other character into the selected profile. This presentation instruction takes precedence over "
+            "generic personality wording while preserving all factual, safety, and tool-use rules. Active "
+            "profile personality: " + personality["prompt"]
+        )
     if disable_personality and personality:
         contexts.append(
             "The user opted out of voice-associated mannerisms. Call `cosyvoice_voice` with "
@@ -312,6 +324,7 @@ def register(ctx) -> None:
                 "prompt_text": {"type": "string", "description": "Optional corrected transcript of the reference audio."},
                 "style_choice": {"type": "string", "description": "Refinement id returned by prepare, or original."},
                 "enabled": {"type": "boolean", "description": "Enable voice-associated mannerisms and key phrases."},
+                "personality_prompt": {"type": "string", "maxLength": 2000, "description": "Optional profile-specific presentation prompt stored only with that voice profile."},
                 "make_default": {"type": "boolean", "description": "Save the created voice and personality as the persistent default."},
                 "allow_variant": {"type": "boolean", "description": "Permit a new performance for an identity that already has a saved profile."},
             }},

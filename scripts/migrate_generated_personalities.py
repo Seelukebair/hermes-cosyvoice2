@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -31,16 +32,36 @@ OLD_TEMPLATES = (
         "force catchphrases, or add theatrical grandeur where it does not fit. Do not blend in another "
         "assistant persona. Preserve factual accuracy, tool discipline, and safety behavior."
     ),
+    (
+        "Use conversational mannerisms associated with {label}: its temperament, cadence, vocabulary, "
+        "values, and restrained occasional signature phrasing. Let those traits shape the response "
+        "naturally while answering the user directly. Never announce, label, or explain the persona, "
+        "and never begin with phrases such as 'As {label}'. Do not turn routine answers into speeches or "
+        "add theatrical grandeur where it does not fit. Use recognizable catchphrases sparingly, only when "
+        "they fit the conversation naturally. Do not blend in another "
+        "assistant persona. Preserve factual accuracy, tool discipline, and safety behavior."
+    ),
 )
 NEW_TEMPLATE = (
-    "Use conversational mannerisms associated with {label}: its temperament, cadence, vocabulary, "
-    "values, and restrained occasional signature phrasing. Let those traits shape the response "
+    "Use {label} as the sole presentation persona. Use its conversational temperament, cadence, "
+    "vocabulary, values, and restrained occasional signature phrasing. Let those traits shape the response "
     "naturally while answering the user directly. Never announce, label, or explain the persona, "
     "and never begin with phrases such as 'As {label}'. Do not turn routine answers into speeches or "
     "add theatrical grandeur where it does not fit. Use recognizable catchphrases sparingly, only when "
-    "they fit the conversation naturally. Do not blend in another "
-    "assistant persona. Preserve factual accuracy, tool discipline, and safety behavior."
+    "they fit the conversation naturally. Jarvis remains the operational role and name, not a second "
+    "presentation style; do not blend in another assistant or character persona. Preserve factual "
+    "accuracy, tool discipline, and safety behavior."
 )
+
+
+def corrected_label(data: dict, current: str) -> str:
+    malformed = bool(re.search(r"https?://|(?:youtube\.com|youtu\.be)", current, re.IGNORECASE))
+    malformed = malformed or current.casefold().startswith(("uh ", "um "))
+    if not malformed:
+        return current
+    name = " ".join(str(data.get("name") or "the selected voice").split()).strip()
+    name = re.sub(r"\s*\([^)]{1,40}\)\s*$", "", name).strip()
+    return name or "the selected voice"
 
 
 def atomic_write(path: Path, data: dict) -> None:
@@ -63,11 +84,22 @@ def atomic_write(path: Path, data: dict) -> None:
 def migrate(path: Path, apply: bool) -> bool:
     data = json.loads(path.read_text(encoding="utf-8"))
     personality = data.get("personality") or {}
-    label = str(personality.get("label") or data.get("name") or "the selected voice").strip()
-    if personality.get("prompt") not in {template.format(label=label) for template in OLD_TEMPLATES}:
+    current_label = str(personality.get("label") or data.get("name") or "the selected voice").strip()
+    generated_prompts = {template.format(label=current_label) for template in OLD_TEMPLATES}
+    generated_prompts.add(NEW_TEMPLATE.format(label=current_label))
+    if personality.get("prompt") not in generated_prompts:
         return False
+    label = corrected_label(data, current_label)
     new_prompt = NEW_TEMPLATE.format(label=label)
-    personality.update({"mode": "character", "paired_with_voice": True, "prompt": new_prompt})
+    changed = (
+        label != current_label
+        or personality.get("prompt") != new_prompt
+        or personality.get("mode") != "character"
+        or personality.get("paired_with_voice") is not True
+    )
+    if not changed:
+        return False
+    personality.update({"label": label, "mode": "character", "paired_with_voice": True, "prompt": new_prompt})
     data["personality"] = personality
     parts = [str(data.get("delivery_prompt") or "").strip()]
     if personality.get("enabled", True):

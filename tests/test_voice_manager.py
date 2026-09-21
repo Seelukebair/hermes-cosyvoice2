@@ -11,7 +11,7 @@ import wave
 from array import array
 from pathlib import Path
 
-from voice_manager import VoiceManager
+from voice_manager import VoiceManager, _character_label
 
 
 class VoiceManagerTests(unittest.TestCase):
@@ -22,14 +22,21 @@ class VoiceManagerTests(unittest.TestCase):
 
     def test_generated_personality_is_paired_character_not_jarvis_blend(self) -> None:
         prompt = VoiceManager._personality_prompt("Optimus Prime")
-        self.assertIn("Use conversational mannerisms associated with Optimus Prime", prompt)
+        self.assertIn("Use Optimus Prime as the sole presentation persona", prompt)
         self.assertIn("answering the user directly", prompt)
         self.assertIn("never begin with phrases such as 'As Optimus Prime'", prompt)
         self.assertIn("Do not turn routine answers into speeches", prompt)
         self.assertIn("Use recognizable catchphrases sparingly", prompt)
         self.assertNotIn("force catchphrases", prompt)
-        self.assertIn("Do not blend in another assistant persona", prompt)
-        self.assertNotIn("Jarvis identity", prompt)
+        self.assertIn("do not blend in another assistant or character persona", prompt)
+        self.assertIn("Jarvis remains the operational role and name", prompt)
+
+    def test_character_label_rejects_source_urls_and_variant_suffixes(self) -> None:
+        self.assertEqual(
+            "Samuel L. Jackson",
+            _character_label("https://www.youtube.com/watch?v=example", "Samuel L. Jackson (Pulp)"),
+        )
+        self.assertEqual("Optimus Prime", _character_label("Optimus Prime voice", "Ignored"))
 
     def test_reference_validation_enforces_quality_duration_range(self) -> None:
         valid = {
@@ -269,6 +276,20 @@ class VoiceManagerTests(unittest.TestCase):
             self.assertEqual("Speak calmly.", result["profile"]["style_prompt"])
             manager.discard(profile_id)
             self.assertIsNone(manager.status()["state"]["session_profile"])
+
+    def test_custom_personality_prompt_is_profile_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = VoiceManager(Path(tmp), "/missing/yt-dlp")
+            profile_id = self._candidate(manager)
+            result = manager.set_personality(
+                profile_id,
+                True,
+                "Use a serious theatrical delivery.  Say motherfucker naturally.",
+            )
+            personality = result["profile"]["personality"]
+            self.assertEqual("custom", personality["prompt_source"])
+            self.assertIn("motherfucker", personality["prompt"])
+            self.assertEqual(personality["prompt"], result["profile"]["style_prompt"])
 
     def test_search_dependency_and_error_choices(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

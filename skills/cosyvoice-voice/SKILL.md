@@ -7,6 +7,10 @@ description: Manage CosyVoice reference-clip discovery, session previews, saved 
 
 Use `cosyvoice_voice`; do not invoke download or conversion commands directly.
 
+When the user asks which cloned voices or voice profiles are available, call
+`cosyvoice_voice` with `action=list` and report friendly names. Mark the active
+session voice and persistent default; do not answer from memory.
+
 1. An authenticated explicit make/build/create/clone request authorizes the
    whole workflow. Use `create` with the requested voice as `query`, a concise
    profile `name`, `make_default=true` when requested, and `enabled=true` unless
@@ -45,9 +49,15 @@ Use `cosyvoice_voice`; do not invoke download or conversion commands directly.
    user directly: never announce or explain the persona, say "As <character>",
    or turn routine answers into theatrical speeches. Use recognizable
    catchphrases sparingly when they fit naturally. Do not
-   blend it with a different assistant personality. Factual accuracy, tool
+   blend it with a different assistant personality. The selected profile is the
+   sole presentation persona; Jarvis remains only the operational role/name.
+   Factual accuracy, tool
    discipline, and safety behavior remain unchanged underneath presentation. On `no`, `voice
    only`, or a similar opt-out, call `set_personality` with `enabled=false`.
+   When the user requests a materially different presentation style, keep it in
+   a separate profile and use `set_personality.personality_prompt`; do not alter
+   the shared template or another profile. Profile-specific instructions may
+   explicitly allow theatrical delivery when requested.
    Do not alter `SOUL.md`; presentation stays profile-scoped.
 5. Read tool errors and present their structured `choices`; do not invent a
    recovery path.

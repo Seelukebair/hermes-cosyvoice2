@@ -53,6 +53,9 @@ class IntentHookTests(unittest.TestCase):
                 self.assertIn("cosyvoice_voice", hook(user_message="Create the voice/personality of a classic radio host.")["context"])
                 self.assertIn("cosyvoice_voice", hook(user_message="Build a Jarvis voice profile with mannerisms.")["context"])
                 self.assertIn("cosyvoice_voice", hook(user_message="Clone Optimus Prime's voice again.")["context"])
+                inventory = hook(user_message="Which cloned voices do we have available?")["context"]
+                self.assertIn("Saved profile inventory", inventory)
+                self.assertIn("cosyvoice_voice", inventory)
                 self.assertIsNone(hook(user_message="What TTS providers are available?"))
             finally:
                 if old is None:
@@ -248,8 +251,9 @@ class IntentHookTests(unittest.TestCase):
             try:
                 plugin = _load_plugin()
                 context = plugin._voice_intent_context(user_message="Hello")
-                self.assertIn("paired with the selected cloned voice", context["context"])
-                self.assertNotIn("subordinate to Jarvis identity", context["context"])
+                self.assertIn("sole presentation personality", context["context"])
+                self.assertIn("Jarvis remains the operational role and name", context["context"])
+                self.assertIn("do not mix generic Jarvis mannerisms", context["context"])
                 creation = plugin._voice_intent_context(user_message="Create an Optimus Prime voice profile.")
                 self.assertIn('"id": "optimus"', creation["context"])
                 self.assertIn("Reuse a matching saved profile", creation["context"])

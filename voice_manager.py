@@ -35,6 +35,19 @@ def _slug(value: str) -> str:
     return (re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")[:48] or f"voice-{uuid.uuid4().hex[:8]}")
 
 
+def _character_label(query: str, name: str) -> str:
+    """Choose a human identity, never a source URL or generic request phrase."""
+    for candidate in (query, name):
+        value = " ".join(str(candidate or "").split()).strip()
+        if not value or re.search(r"https?://|(?:youtube\.com|youtu\.be)", value, re.IGNORECASE):
+            continue
+        value = re.sub(r"\s+voice(?:\s+(?:clone|profile))?$", "", value, flags=re.IGNORECASE).strip()
+        value = re.sub(r"\s*\([^)]{1,40}\)\s*$", "", value).strip()
+        if value and value.casefold() not in {"custom", "custom voice", "the selected voice"}:
+            return value[:120]
+    return "the selected voice"
+
+
 _PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _PROCESS_LOCK = threading.RLock()
 
@@ -100,7 +113,11 @@ class VoiceManager:
                 str(args.get("prompt_text") or ""), str(args.get("profile_id") or ""),
             ),
             "refine": lambda: self.refine(str(args.get("profile_id") or ""), str(args.get("style_choice") or "")),
-            "set_personality": lambda: self.set_personality(str(args.get("profile_id") or ""), bool(args.get("enabled", True))),
+            "set_personality": lambda: self.set_personality(
+                str(args.get("profile_id") or ""),
+                bool(args.get("enabled", True)),
+                str(args.get("personality_prompt") or ""),
+            ),
             "accept": lambda: self.accept(str(args.get("profile_id") or ""), str(args.get("style_choice") or "original"), True, False),
             "set_default": lambda: self.accept(str(args.get("profile_id") or ""), str(args.get("style_choice") or "original"), True, True),
             "reset": self.reset, "discard": lambda: self.discard(str(args.get("profile_id") or "")),
@@ -408,7 +425,7 @@ class VoiceManager:
             )
         transcript_source = "request" if supplied_transcript else "automatic_asr"
         validation = {"status": "signal_validated", "reason": "Deterministic signal checks passed; the transcript is accepted for conditioning but may require human correction.", **metrics}
-        personality_label = (query.strip() or name.strip() or "the selected voice")[:120]
+        personality_label = _character_label(query, name)
         metadata = {"id": candidate_id, "name": name.strip()[:100] or "Custom voice", "status": "preview", "created_at": int(time.time()), "source": {"url": source_url, "segment_start": round(start + segment["start_seconds"], 2), "segment_duration": self.TARGET_SECONDS}, "reference_wav": "reference.wav", "prompt_text": transcript, "transcript": {"text": transcript, "accepted": True, "verified": bool(supplied_transcript), "source": transcript_source, "error": transcription_error}, "cosyvoice": {"reference_wav": "reference.wav", "sample_rate": self.TARGET_SAMPLE_RATE}, "validation": validation, "refinements": self._refinements(metrics), "selected_style": "original", "delivery_prompt": "", "personality": {"enabled": True, "label": personality_label, "mode": "character", "paired_with_voice": True, "prompt": self._personality_prompt(personality_label)}}
         self._refresh_style_prompt(metadata)
         self._write_json(candidate_dir / "profile.json", metadata)
@@ -485,9 +502,19 @@ class VoiceManager:
         self._set_state(session_profile=profile_id, candidate=source.parent == self.candidates)
         return {"status": "preview_ready", "stage": "style_preview", "summary": "The refinement is selected for the next CosyVoice synthesis request.", "profile": metadata}
 
-    def set_personality(self, profile_id: str, enabled: bool) -> dict[str, Any]:
+    def set_personality(self, profile_id: str, enabled: bool, personality_prompt: str = "") -> dict[str, Any]:
         source, metadata = self._profile_source(profile_id)
-        metadata.setdefault("personality", {})["enabled"] = enabled
+        personality = metadata.setdefault("personality", {})
+        personality["enabled"] = enabled
+        custom_prompt = " ".join(personality_prompt.split()).strip()
+        if custom_prompt:
+            if len(custom_prompt) > 2000:
+                raise VoiceWorkflowError(
+                    "personality", "PERSONALITY_PROMPT_TOO_LONG",
+                    "The profile personality prompt must be 2,000 characters or fewer.",
+                )
+            personality["prompt"] = custom_prompt
+            personality["prompt_source"] = "custom"
         self._refresh_style_prompt(metadata)
         self._write_json(source / "profile.json", metadata)
         return {"status": "ok", "stage": "personality", "summary": "Voice-associated mannerisms " + ("enabled." if enabled else "disabled."), "profile": metadata}
@@ -495,14 +522,14 @@ class VoiceManager:
     @staticmethod
     def _personality_prompt(label: str) -> str:
         return (
-            f"Use conversational mannerisms associated with {label}: its temperament, cadence, "
+            f"Use {label} as the sole presentation persona. Use its conversational temperament, cadence, "
             "vocabulary, values, and restrained occasional signature phrasing. Let those traits shape "
             "the response naturally while answering the user directly. Never announce, label, or explain "
             f"the persona, and never begin with phrases such as 'As {label}'. Do not turn routine answers "
             "into speeches or add theatrical grandeur where it does not fit. Use recognizable catchphrases "
-            "sparingly, only when they fit the conversation naturally. Do not "
-            "blend in another assistant persona. Preserve factual accuracy, tool discipline, and safety "
-            "behavior."
+            "sparingly, only when they fit the conversation naturally. Jarvis remains the operational role "
+            "and name, not a second presentation style; do not blend in another assistant or character "
+            "persona. Preserve factual accuracy, tool discipline, and safety behavior."
         )
 
     @staticmethod
