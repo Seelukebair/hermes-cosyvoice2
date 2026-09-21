@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.9.0
+
+- Clean new voice references with an isolated BS-RoFormer runtime before local
+  transcription and CosyVoice conditioning.
+- Conservatively compact pauses longer than 350 ms while retaining natural
+  150 ms joins and enforcing the existing 10-15 second reference contract.
+- Fall back to the raw extraction when cleanup is unavailable or invalid, and
+  record the cleanup result in profile metadata.
+
 ## 1.8.1
 
 - Recognize natural plural inventory questions such as "which cloned voices are

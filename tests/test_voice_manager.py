@@ -10,6 +10,7 @@ import unittest
 import wave
 from array import array
 from pathlib import Path
+from unittest import mock
 
 from voice_manager import VoiceManager, _character_label
 
@@ -48,6 +49,51 @@ class VoiceManagerTests(unittest.TestCase):
             VoiceManager._validate_metrics({**valid, "duration_seconds": 9.99})
         with self.assertRaisesRegex(Exception, "failed deterministic signal checks"):
             VoiceManager._validate_metrics({**valid, "duration_seconds": 15.01})
+
+    def test_reference_cleaner_is_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = VoiceManager(Path(tmp) / "profiles", "/missing/yt-dlp")
+            source = Path(tmp) / "raw.wav"
+            output = Path(tmp) / "clean.wav"
+            self._speech_like_wav(source)
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("COSYVOICE_CLEAN_REFERENCE_COMMAND", None)
+                result = manager._clean_reference(source, output)
+            self.assertEqual("not_configured", result["status"])
+            self.assertTrue(output.is_file())
+            self.assertFalse(source.exists())
+
+    def test_reference_cleaner_falls_back_when_command_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = VoiceManager(Path(tmp) / "profiles", "/missing/yt-dlp")
+            source = Path(tmp) / "raw.wav"
+            output = Path(tmp) / "clean.wav"
+            self._speech_like_wav(source)
+            with mock.patch.dict(
+                os.environ,
+                {"COSYVOICE_CLEAN_REFERENCE_COMMAND": "missing-cleaner {input_path} {output_path}"},
+            ):
+                result = manager._clean_reference(source, output)
+            self.assertEqual("fallback_raw", result["status"])
+            self.assertTrue(output.is_file())
+
+    def test_reference_cleaner_accepts_valid_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = VoiceManager(Path(tmp) / "profiles", "/missing/yt-dlp")
+            source = Path(tmp) / "raw.wav"
+            output = Path(tmp) / "clean.wav"
+            helper = Path(tmp) / "copy_cleaner.py"
+            self._speech_like_wav(source)
+            helper.write_text(
+                "import shutil,sys\nshutil.copy2(sys.argv[1], sys.argv[2])\n",
+                encoding="utf-8",
+            )
+            command = f'"{sys.executable}" "{helper}" {{input_path}} {{output_path}}'
+            with mock.patch.dict(os.environ, {"COSYVOICE_CLEAN_REFERENCE_COMMAND": command}):
+                result = manager._clean_reference(source, output)
+            self.assertEqual("applied", result["status"])
+            self.assertTrue(output.is_file())
+            self.assertFalse(source.exists())
 
     def _speech_like_wav(self, path: Path, rate: int = 24000) -> None:
         samples = array("h")

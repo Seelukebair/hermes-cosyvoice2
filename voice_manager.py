@@ -383,7 +383,9 @@ class VoiceManager:
         candidate_id = f"{_slug(name)}-{uuid.uuid4().hex[:8]}"
         candidate_dir = self.candidates / candidate_id
         candidate_dir.mkdir(parents=True)
-        source_wav, reference_wav = candidate_dir / "source.wav", candidate_dir / "reference.wav"
+        source_wav = candidate_dir / "source.wav"
+        raw_reference_wav = candidate_dir / "reference.raw.wav"
+        reference_wav = candidate_dir / "reference.wav"
         start = max(0.0, float(start_seconds or 0.0))
         try:
             leg = time.perf_counter()
@@ -398,7 +400,8 @@ class VoiceManager:
             segment = self._choose_segment(source_wav)
             timings["segment_scan"] = round((time.perf_counter() - leg) * 1000)
             leg = time.perf_counter()
-            self._run("extract", ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", str(segment["start_seconds"]), "-t", str(self.TARGET_SECONDS), "-i", str(source_wav), "-ac", "1", "-ar", str(self.TARGET_SAMPLE_RATE), "-c:a", "pcm_s16le", str(reference_wav)], 45)
+            self._run("extract", ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", str(segment["start_seconds"]), "-t", str(self.TARGET_SECONDS), "-i", str(source_wav), "-ac", "1", "-ar", str(self.TARGET_SAMPLE_RATE), "-c:a", "pcm_s16le", str(raw_reference_wav)], 45)
+            cleanup = self._clean_reference(raw_reference_wav, reference_wav)
             metrics = self.analyze_wav(reference_wav)
             self._validate_metrics(metrics)
             timings["extract_and_signal_validation"] = round((time.perf_counter() - leg) * 1000)
@@ -426,7 +429,7 @@ class VoiceManager:
         transcript_source = "request" if supplied_transcript else "automatic_asr"
         validation = {"status": "signal_validated", "reason": "Deterministic signal checks passed; the transcript is accepted for conditioning but may require human correction.", **metrics}
         personality_label = _character_label(query, name)
-        metadata = {"id": candidate_id, "name": name.strip()[:100] or "Custom voice", "status": "preview", "created_at": int(time.time()), "source": {"url": source_url, "segment_start": round(start + segment["start_seconds"], 2), "segment_duration": self.TARGET_SECONDS}, "reference_wav": "reference.wav", "prompt_text": transcript, "transcript": {"text": transcript, "accepted": True, "verified": bool(supplied_transcript), "source": transcript_source, "error": transcription_error}, "cosyvoice": {"reference_wav": "reference.wav", "sample_rate": self.TARGET_SAMPLE_RATE}, "validation": validation, "refinements": self._refinements(metrics), "selected_style": "original", "delivery_prompt": "", "personality": {"enabled": True, "label": personality_label, "mode": "character", "paired_with_voice": True, "prompt": self._personality_prompt(personality_label)}}
+        metadata = {"id": candidate_id, "name": name.strip()[:100] or "Custom voice", "status": "preview", "created_at": int(time.time()), "source": {"url": source_url, "segment_start": round(start + segment["start_seconds"], 2), "segment_duration": metrics["duration_seconds"], "reference_cleanup": cleanup}, "reference_wav": "reference.wav", "prompt_text": transcript, "transcript": {"text": transcript, "accepted": True, "verified": bool(supplied_transcript), "source": transcript_source, "error": transcription_error}, "cosyvoice": {"reference_wav": "reference.wav", "sample_rate": self.TARGET_SAMPLE_RATE}, "validation": validation, "refinements": self._refinements(metrics), "selected_style": "original", "delivery_prompt": "", "personality": {"enabled": True, "label": personality_label, "mode": "character", "paired_with_voice": True, "prompt": self._personality_prompt(personality_label)}}
         self._refresh_style_prompt(metadata)
         self._write_json(candidate_dir / "profile.json", metadata)
         self._set_state(session_profile=candidate_id, candidate=True)
@@ -434,6 +437,45 @@ class VoiceManager:
         metadata["timings_ms"] = timings
         self._write_json(candidate_dir / "profile.json", metadata)
         return {"status": "preview_ready", "stage": "automatic_transcript", "summary": "Signal checks passed and the local transcript was accepted automatically.", "profile": metadata, "timings_ms": timings}
+
+    def _clean_reference(self, input_path: Path, output_path: Path) -> dict[str, Any]:
+        """Run an optional isolated cleaner and safely retain the raw reference."""
+        command_template = os.getenv("COSYVOICE_CLEAN_REFERENCE_COMMAND", "").strip()
+        if not command_template:
+            os.replace(input_path, output_path)
+            return {"status": "not_configured", "applied": False}
+
+        command = [
+            part.replace("{input_path}", str(input_path)).replace("{output_path}", str(output_path))
+            for part in shlex.split(command_template)
+        ]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
+            if result.returncode != 0 or not output_path.is_file():
+                detail = (result.stderr or result.stdout or "cleaner produced no output").strip()[-300:]
+                raise RuntimeError(detail)
+            cleaned_metrics = self.analyze_wav(output_path)
+            self._validate_metrics(cleaned_metrics)
+            try:
+                cleaner_report = json.loads(result.stdout.strip().splitlines()[-1])
+            except (IndexError, json.JSONDecodeError):
+                cleaner_report = {}
+            input_path.unlink(missing_ok=True)
+            return {
+                "status": "applied",
+                "applied": True,
+                "method": str(cleaner_report.get("method") or "external_reference_cleaner"),
+                "pause_compaction_applied": bool(cleaner_report.get("pause_compaction_applied", False)),
+                "metrics": cleaned_metrics,
+            }
+        except (OSError, RuntimeError, subprocess.TimeoutExpired, VoiceWorkflowError) as exc:
+            output_path.unlink(missing_ok=True)
+            os.replace(input_path, output_path)
+            return {
+                "status": "fallback_raw",
+                "applied": False,
+                "reason": str(exc)[:300],
+            }
 
     def _supply_verified_transcript(self, profile_id: str, prompt_text: str) -> dict[str, Any]:
         source, metadata = self._profile_source(profile_id)

@@ -101,6 +101,16 @@ Each saved profile contains:
 - `profile.json`: source provenance, signal metrics, conditioning transcript,
   delivery settings, and paired character personality.
 - `state.json`: accepted session selection and persistent default.
+
+Voice creation can run an isolated reference cleaner before transcription by
+setting `COSYVOICE_CLEAN_REFERENCE_COMMAND`. The command receives
+`{input_path}` and `{output_path}` placeholders. `runtime/clean_reference.py`
+provides the production implementation: BS-RoFormer dialogue isolation followed
+by conservative removal of pauses longer than 350 ms. Cleaned output must still
+pass the normal 10-15 second signal contract; otherwise creation retains the raw
+reference and records `fallback_raw` in profile metadata. Use
+`deploy/install-reference-cleaner.sh` to create the isolated runtime and
+`deploy/hermes-gateway-reference-cleaner.conf` to activate it for Hermes.
 - `recent_sources.json`: bounded source authorization used by the acquisition workflow.
 
 The plugin exposes `status`, `list`, `search`, `create`, `prepare`, `refine`,
