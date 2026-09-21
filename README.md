@@ -68,7 +68,7 @@ Register the command provider with an atomic config backup under
 `${JARVIS_BACKUP_ROOT:-/srv/jarvis-backups}/YYYY-MM-DD/cosyvoice2/`:
 
 ```bash
-python scripts/register_hermes_provider.py --activate --speed 1.10
+python scripts/register_hermes_provider.py --activate --speed 1.20
 hermes gateway restart
 ```
 

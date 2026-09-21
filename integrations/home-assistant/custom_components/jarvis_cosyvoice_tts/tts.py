@@ -31,6 +31,7 @@ from .const import (
     CONF_FALLBACK_ENTITY_ID,
     CONF_REQUEST_TIMEOUT,
     DEFAULT_LANGUAGE,
+    DEFAULT_SPEED,
     DEFAULT_VOICE,
     DOMAIN,
     OPTION_INSTRUCT,
@@ -65,7 +66,7 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
     _attr_supported_options = [ATTR_VOICE, OPTION_SPEED, OPTION_INSTRUCT]
     _attr_default_options = {
         ATTR_VOICE: DEFAULT_VOICE,
-        OPTION_SPEED: 1.0,
+        OPTION_SPEED: DEFAULT_SPEED,
         OPTION_INSTRUCT: "",
     }
 
@@ -156,7 +157,7 @@ class JarvisCosyVoiceTTSEntity(TextToSpeechEntity):
             # Never pin a Home Assistant request to a profile id. The Jarvis
             # bridge resolves this shared selector from current profile state.
             "voice": DEFAULT_VOICE,
-            "speed": float(options.get(OPTION_SPEED, 1.0)),
+            "speed": float(options.get(OPTION_SPEED, DEFAULT_SPEED)),
             "instruct": str(options.get(OPTION_INSTRUCT, "")),
         }
 

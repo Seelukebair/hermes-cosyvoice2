@@ -200,6 +200,11 @@ class TtsStreamTests(unittest.IsolatedAsyncioTestCase):
         entity._request_timeout = 30
         return entity
 
+    def test_empty_options_use_global_default_speed(self) -> None:
+        entity = self._entity(FakeResponse(WAV_HEADER))
+
+        self.assertEqual(1.2, entity._payload("test", {})["speed"])
+
     async def test_stream_forwards_wav_and_releases_response(self) -> None:
         response = FakeResponse(WAV_HEADER + b"first pcm" + b"second pcm")
         entity = self._entity(response)

@@ -44,7 +44,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=Path.home() / ".hermes" / "config.yaml")
     parser.add_argument("--prefix", type=Path, default=Path("/srv/cosyvoice2"))
-    parser.add_argument("--speed", type=float, default=1.10)
+    parser.add_argument("--speed", type=float, default=1.20)
     parser.add_argument("--activate", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

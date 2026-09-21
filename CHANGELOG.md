@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.11.1
+
+- Align the Hermes command provider and Home Assistant TTS defaults at 1.20x
+  delivery speed, with a contract test for requests that omit speed options.
+
 ## 1.11.0
 
 - Add explicit post-placement JIT and TensorRT flow acceleration controls while
